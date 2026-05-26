@@ -1,0 +1,197 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "consultar_menu",
+      "description": "Devuelve el menú completo de Yoyo Burguer con todos los productos organizados por categoría (hamburguesas, hot dogs, complementos). Muestra precios, disponibilidad y tipos.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "verificar_disponibilidad",
+      "description": "Verifica si un producto específico está disponible para ordenar. Retorna precio, tipo y estado de disponibilidad.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "producto": {
+            "type": "string",
+            "description": "Nombre del producto a verificar (ej: 'Hamburguesa Sencilla', 'Hot Dog Hawaiano', 'Papas a la francesa')"
+          }
+        },
+        "required": ["producto"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "consultar_ingredientes",
+      "description": "Devuelve la lista completa de ingredientes de un producto específico junto con su precio y disponibilidad.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "producto": {
+            "type": "string",
+            "description": "Nombre del producto (ej: 'Hamburguesa Sencilla', 'Natsu Burger', 'Hot Dog Especial')"
+          }
+        },
+        "required": ["producto"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "crear_pedido",
+      "description": "Registra un nuevo pedido con los productos indicados. Calcula el total automáticamente. Retorna ID del pedido, total y detalles.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lista de nombres de productos a ordenar (ej: ['Hamburguesa Sencilla', 'Hot Dog Hawaiano', 'Papas a la francesa'])"
+          }
+        },
+        "required": ["items"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "consultar_estado_pedido",
+      "description": "Revisa el estado actual de un pedido existente. Muestra si está en cocina, listo, entregado o cancelado.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pedido_id": {
+            "type": "string",
+            "description": "ID del pedido a consultar (ej: 'PED-1001')"
+          }
+        },
+        "required": ["pedido_id"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "cancelar_pedido",
+      "description": "Cancela un pedido activo que aún no ha sido entregado. Solo puede cancelar pedidos en estado 'en_cocina'.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pedido_id": {
+            "type": "string",
+            "description": "ID del pedido a cancelar (ej: 'PED-1001')"
+          }
+        },
+        "required": ["pedido_id"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "aplicar_descuento",
+      "description": "Aplica un código de descuento válido a un pedido existente. Códigos válidos: 'YOYO10' (10% descuento), 'PROMO20' (20% descuento), 'BIENVENIDO' (15% descuento).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pedido_id": {
+            "type": "string",
+            "description": "ID del pedido (ej: 'PED-1001')"
+          },
+          "codigo": {
+            "type": "string",
+            "description": "Código promocional: YOYO10, PROMO20, o BIENVENIDO"
+          }
+        },
+        "required": ["pedido_id", "codigo"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "consultar_tiempo_espera",
+      "description": "Devuelve el tiempo estimado de espera basado en la cantidad de pedidos activos que están en cocina. Tiempo base: 5 minutos + 4 minutos por pedido activo.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "registrar_cliente",
+      "description": "Registra un nuevo cliente en el sistema con su nombre y número de teléfono. El teléfono debe tener 10 dígitos.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "description": "Nombre completo del cliente"
+          },
+          "telefono": {
+            "type": "string",
+            "description": "Número de teléfono a 10 dígitos (ej: '9993258671')"
+          }
+        },
+        "required": ["nombre", "telefono"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "consultar_historial_cliente",
+      "description": "Devuelve el historial completo de pedidos de un cliente registrado. Necesita el número de teléfono del cliente.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "telefono": {
+            "type": "string",
+            "description": "Número de teléfono del cliente a 10 dígitos (ej: '9993258671')"
+          }
+        },
+        "required": ["telefono"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "obtener_informacion_yoyo",
+      "description": "Devuelve información general del establecimiento Yoyo Burguer: ubicación, teléfono, horarios, servicios disponibles, métodos de pago y políticas.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "obtener_complementos",
+      "description": "Devuelve la lista de todos los complementos y guarniciones disponibles (papas, salchichas tipo pulpo, etc.) con sus precios.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  }
+]
