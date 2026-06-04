@@ -2,18 +2,19 @@ import streamlit as st
 import requests
 import json
 import traceback
+import os
 
 # ── Configuración de página ───────────────────────────────
 st.set_page_config(
     page_title="Yoyo's IA",
-    page_icon="🤖",
     layout="wide"
 )
 
-st.title("🤖 Yoyo's IA")
+st.title("Yoyo's IA")
 st.caption("Sistema RAG + Function Calling con Llama 3.2 8B")
 
 # ── Importar búsqueda vectorial y funciones ───────────────
+from database import init_database
 from query import buscar_contexto
 from functions import (
     consultar_menu,
@@ -22,15 +23,18 @@ from functions import (
     crear_pedido,
     consultar_estado_pedido,
     cancelar_pedido,
-    aplicar_descuento,
     consultar_tiempo_espera,
     registrar_cliente,
     consultar_historial_cliente,
     obtener_informacion_yoyo,
-    obtener_complementos
+    obtener_complementos,
+    validar_pago_pedido
 )
 
-LLAMA_URL = "http://127.0.0.1:8080/v1/chat/completions"
+init_database()
+
+
+LLAMA_URL = os.getenv("LLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
 
 # ── Cargar tools_schema.json ───────────────────────────────
 with open("tools_schema.json", "r", encoding="utf-8") as f:
@@ -44,27 +48,17 @@ FUNCIONES_DISPONIBLES = {
     "crear_pedido": crear_pedido,
     "consultar_estado_pedido": consultar_estado_pedido,
     "cancelar_pedido": cancelar_pedido,
-    "aplicar_descuento": aplicar_descuento,
     "consultar_tiempo_espera": consultar_tiempo_espera,
     "registrar_cliente": registrar_cliente,
     "consultar_historial_cliente": consultar_historial_cliente,
     "obtener_informacion_yoyo": obtener_informacion_yoyo,
     "obtener_complementos": obtener_complementos,
+    "validar_pago_pedido": validar_pago_pedido,
 }
 
 
 # ── Ejecutor de herramientas ───────────────────────────────
 def ejecutar_funcion(nombre_funcion: str, argumentos: dict) -> dict:
-    """
-    Ejecuta una función del sistema con los argumentos proporcionados.
-    
-    Args:
-        nombre_funcion: Nombre de la función a ejecutar.
-        argumentos: Dict con parámetros.
-    
-    Returns:
-        dict con resultado o error.
-    """
     if nombre_funcion not in FUNCIONES_DISPONIBLES:
         return {
             "error": f"Función '{nombre_funcion}' no existe.",
@@ -85,15 +79,6 @@ def ejecutar_funcion(nombre_funcion: str, argumentos: dict) -> dict:
 
 # ── Función para llamar a Llama CON TOOL CALLING ──────────
 def responder(pregunta: str, contexto_rag: str = None):
-    """
-    Llama a Llama 3.2 8B con:
-    1. Contexto RAG (búsqueda vectorial)
-    2. Tools schema (funciones disponibles)
-    
-    Retorna respuesta final después de ejecutar herramientas si es necesario.
-    """
-    
-    # Si no hay contexto RAG, buscar primero
     if contexto_rag is None:
         contexto_rag = buscar_contexto(pregunta)
     
@@ -108,16 +93,19 @@ Usa las funciones disponibles para responder preguntas sobre:
 ✓ Menú y precios
 ✓ Disponibilidad de productos
 ✓ Ingredientes
-✓ Pedidos (crear, consultar, cancelar)
-✓ Descuentos
+✓ Pedidos (crear, consultar, cancelar, validar pago)
 ✓ Clientes y historial
 
 Si el usuario pide algo que pueda resolver con una función, ÚSALA.
 Si no puede resolverse con funciones, usa el contexto RAG.
+Responde siempre en español claro, breve y natural.
+No muestres código, pseudocódigo, JSON, ni instrucciones técnicas.
+No uses lenguaje de programación como `const`, `await`, `console.log` o similar.
+Si el usuario necesita hacer un pedido, explícale el paso de forma simple y práctica.
 Siempre sé amable y útil."""
 
-    # ── Primer llamado a Llama CON tools ──
     payload = {
+        "model": "mistral",
         "messages": [
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": f"Contexto de BD:\n{contexto_rag}\n\nPregunta: {pregunta}"}
@@ -129,16 +117,17 @@ Siempre sé amable y útil."""
     }
     
     try:
-        respuesta = requests.post(LLAMA_URL, json=payload, timeout=60)
+        respuesta = requests.post(LLAMA_URL, json=payload, timeout=120)
         resultado_inicial = respuesta.json()
-        
     except Exception as e:
         return f"❌ Error conectando con Llama: {e}", None
     
-    # ── Procesar respuesta ────────────────────────────────
+    if "choices" not in resultado_inicial or not resultado_inicial["choices"]:
+        error_msg = resultado_inicial.get("error", {}).get("message", str(resultado_inicial))
+        return f"❌ Error de Ollama: {error_msg}", None
+    
     mensaje_respuesta = resultado_inicial["choices"][0]["message"]
     
-    # Si hay tool_calls, ejecutarlas
     if "tool_calls" in mensaje_respuesta:
         tool_calls = mensaje_respuesta["tool_calls"]
         resultados_tools = []
@@ -147,13 +136,11 @@ Siempre sé amable y útil."""
             nombre_herramienta = tool_call["function"]["name"]
             args_json = tool_call["function"]["arguments"]
             
-            # Parsear argumentos (puede ser string o dict)
             if isinstance(args_json, str):
                 argumentos = json.loads(args_json)
             else:
                 argumentos = args_json
             
-            # Ejecutar función
             resultado_ejecucion = ejecutar_funcion(nombre_herramienta, argumentos)
             resultados_tools.append({
                 "tool_name": nombre_herramienta,
@@ -161,14 +148,12 @@ Siempre sé amable y útil."""
                 "result": resultado_ejecucion
             })
         
-        # ── Segundo llamado a Llama CON resultados de tools ──
         mensajes_segunda_ronda = [
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": f"Contexto de BD:\n{contexto_rag}\n\nPregunta: {pregunta}"},
             mensaje_respuesta
         ]
         
-        # Agregar resultados de tools
         for tool_result in resultados_tools:
             mensajes_segunda_ronda.append({
                 "role": "tool",
@@ -176,15 +161,15 @@ Siempre sé amable y útil."""
                 "content": json.dumps(tool_result["result"], ensure_ascii=False)
             })
         
-        # Llamar Llama nuevamente para que genere respuesta final
         payload_segunda = {
+            "model": "mistral",
             "messages": mensajes_segunda_ronda,
             "max_tokens": 1024,
             "stream": False
         }
         
         try:
-            respuesta_final = requests.post(LLAMA_URL, json=payload_segunda, timeout=60)
+            respuesta_final = requests.post(LLAMA_URL, json=payload_segunda, timeout=120)
             resultado_final = respuesta_final.json()
             texto_respuesta = resultado_final["choices"][0]["message"]["content"]
         except Exception as e:
@@ -193,86 +178,76 @@ Siempre sé amable y útil."""
         return texto_respuesta, resultados_tools
     
     else:
-        # Sin tool_calls, retornar respuesta directo
         texto_respuesta = mensaje_respuesta.get("content", "Sin respuesta")
         return texto_respuesta, None
+
 
 # ── Historial de conversación ─────────────────────────────
 if "historial" not in st.session_state:
     st.session_state.historial = []
 
-# ── Columnas para mejor visualización ──────────────────────
+# ── Creación de columnas en la interfaz ────────────────────
 col_chat, col_tools = st.columns([3, 1])
 
-# ── Input del usuario ─────────────────────────────────────
+# ── LÓGICA DE LA COLUMNA DEL CHAT (Izquierda) ──────────────
 with col_chat:
+    # 1. Mostrar historial guardado PRIMERO
+    for mensaje in st.session_state.historial:
+        with st.chat_message(mensaje["rol"]):
+            st.write(mensaje["texto"])
+            
+            if "tools_ejecutadas" in mensaje and mensaje["tools_ejecutadas"]:
+                with st.expander("🔧 Herramientas ejecutadas"):
+                    for tool in mensaje["tools_ejecutadas"]:
+                        st.write(f"**Función**: `{tool['tool_name']}`")
+                        st.write(f"**Parámetros**: {tool['arguments']}")
+                        if "error" in tool["result"]:
+                            st.error(f"Error: {tool['result']['error']}")
+                        elif tool["result"].get("exito"):
+                            st.json(tool["result"]["resultado"])
+
+    # 2. El Input del usuario se coloca DESPUÉS del historial para que quede abajo
     pregunta = st.chat_input("Escribe tu pregunta...")
 
-# ── Mostrar historial ─────────────────────────────────────
-for mensaje in st.session_state.historial:
-    with st.chat_message(mensaje["rol"]):
-        st.write(mensaje["texto"])
+    # 3. Procesar la nueva pregunta si existe
+    if pregunta:
+        with st.chat_message("user"):
+            st.write(pregunta)
         
-        # Si hay resultados de tools, mostrarlos
-        if "tools_ejecutadas" in mensaje and mensaje["tools_ejecutadas"]:
-            with st.expander("🔧 Herramientas ejecutadas"):
-                for tool in mensaje["tools_ejecutadas"]:
-                    st.write(f"**Función**: `{tool['tool_name']}`")
-                    st.write(f"**Parámetros**: {tool['arguments']}")
-                    if "error" in tool["result"]:
-                        st.error(f"Error: {tool['result']['error']}")
-                    elif tool["result"].get("exito"):
-                        st.json(tool["result"]["resultado"])
+        st.session_state.historial.append({
+            "rol": "user",
+            "texto": pregunta,
+            "tools_ejecutadas": None
+        })
 
-# ── Procesar pregunta ─────────────────────────────────────
-if pregunta:
-    # Mostrar pregunta del usuario
-    with st.chat_message("user"):
-        st.write(pregunta)
-    st.session_state.historial.append({
-        "rol": "user",
-        "texto": pregunta,
-        "tools_ejecutadas": None
-    })
+        with st.chat_message("assistant"):
+            with st.spinner("Procesando (RAG + Function Calling)..."):
+                respuesta_texto, tools_ejecutadas = responder(pregunta)
+            
+            st.write(respuesta_texto)
+            
+            if tools_ejecutadas:
+                with st.expander("🔧 Herramientas ejecutadas en esta respuesta"):
+                    for tool in tools_ejecutadas:
+                        st.write(f"**Función**: `{tool['tool_name']}`")
+                        st.write(f"**Parámetros**: {tool['arguments']}")
+                        if "error" in tool["result"]:
+                            st.error(f"❌ {tool['result']['error']}")
+                        elif tool["result"].get("exito"):
+                            st.success("✅ Ejecución exitosa")
+                            st.json(tool["result"]["resultado"])
+            
+            contexto_rag = buscar_contexto(pregunta)
+            with st.expander("📚 Contexto RAG utilizado"):
+                st.text(contexto_rag)
+        
+        st.session_state.historial.append({
+            "rol": "assistant",
+            "texto": respuesta_texto,
+            "tools_ejecutadas": tools_ejecutadas
+        })
 
-    # Generar respuesta con tool calling
-    with st.chat_message("assistant"):
-        with st.spinner("Procesando (RAG + Function Calling)..."):
-            respuesta_texto, tools_ejecutadas = responder(pregunta)
-        
-        st.write(respuesta_texto)
-        
-        # Mostrar herramientas ejecutadas si las hay
-        if tools_ejecutadas:
-            with st.expander("🔧 Herramientas ejecutadas en esta respuesta"):
-                for tool in tools_ejecutadas:
-                    st.write(f"**Función**: `{tool['tool_name']}`")
-                    st.write(f"**Parámetros**: {tool['arguments']}")
-                    if "error" in tool["result"]:
-                        st.error(f"❌ {tool['result']['error']}")
-                    elif tool["result"].get("exito"):
-                        st.success("✅ Ejecución exitosa")
-                        st.json(tool["result"]["resultado"])
-        
-        # Mostrar contexto RAG usado
-        contexto_rag = buscar_contexto(pregunta)
-        with st.expander("📚 Contexto RAG utilizado"):
-            st.text(contexto_rag)
-    
-    # Guardar en historial
-    st.session_state.historial.append({
-        "rol": "assistant",
-        "texto": respuesta_texto,
-        "tools_ejecutadas": tools_ejecutadas
-    })
-
-# ── Panel lateral con info del sistema ──────────────────────
-with st.sidebar:
-    st.markdown("### ℹ️ Información del Sistema")
-    st.write(f"**Modelo**: Llama 3.2 8B Q4_K_M")
-    st.write(f"**URL**: {LLAMA_URL}")
-    st.write(f"**Herramientas disponibles**: {len(FUNCIONES_DISPONIBLES)}")
-    
-    st.markdown("### 🔧 Funciones disponibles")
-    for nombre in FUNCIONES_DISPONIBLES.keys():
-        st.write(f"- `{nombre}`")
+# ── LÓGICA DE LA COLUMNA DE HERRAMIENTAS (Derecha) ─────────
+with col_tools:
+    st.subheader("🛠️ Panel de Control")
+    st.info("Aquí puedes ver logs o configuraciones adicionales en tiempo real.")

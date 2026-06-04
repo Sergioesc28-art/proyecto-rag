@@ -102,33 +102,29 @@
   {
     "type": "function",
     "function": {
-      "name": "aplicar_descuento",
-      "description": "Aplica un código de descuento válido a un pedido existente. Códigos válidos: 'YOYO10' (10% descuento), 'PROMO20' (20% descuento), 'BIENVENIDO' (15% descuento).",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "pedido_id": {
-            "type": "string",
-            "description": "ID del pedido (ej: 'PED-1001')"
-          },
-          "codigo": {
-            "type": "string",
-            "description": "Código promocional: YOYO10, PROMO20, o BIENVENIDO"
-          }
-        },
-        "required": ["pedido_id", "codigo"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
       "name": "consultar_tiempo_espera",
       "description": "Devuelve el tiempo estimado de espera basado en la cantidad de pedidos activos que están en cocina. Tiempo base: 5 minutos + 4 minutos por pedido activo.",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "validar_pago_pedido",
+      "description": "Marca un pedido como pagado y lo pasa a estado en cocina. Útil para validar transferencias o pagos confirmados.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pedido_id": {
+            "type": "string",
+            "description": "ID del pedido a validar (ej: 'PED-1001')"
+          }
+        },
+        "required": ["pedido_id"]
       }
     }
   },
