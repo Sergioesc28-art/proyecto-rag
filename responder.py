@@ -35,7 +35,7 @@ No inventes información externa.
             }
         ],
         "max_tokens": 512,
-        "temperature": 0.3,
+        "temperature": 0.0,
         "stream": False
     }
 

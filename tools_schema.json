@@ -59,6 +59,14 @@
               "type": "string"
             },
             "description": "Lista de nombres de productos a ordenar (ej: ['Hamburguesa Sencilla', 'Hot Dog Hawaiano', 'Papas a la francesa'])"
+          },
+          "telefono": {
+            "type": "string",
+            "description": "Teléfono del cliente para asociar el pedido si ya fue proporcionado en la conversación"
+          },
+          "nombre": {
+            "type": "string",
+            "description": "Nombre del cliente si lo compartió en la conversación"
           }
         },
         "required": ["items"]

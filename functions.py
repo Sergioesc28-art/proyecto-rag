@@ -1,7 +1,9 @@
 """Funciones de negocio de Yoyo Burguer."""
 
 from __future__ import annotations
+import streamlit as st
 
+import re
 from typing import Any, Dict, List
 
 from database import (
@@ -20,6 +22,9 @@ def _normalizar_producto(producto: str) -> Dict[str, Any] | None:
     return obtener_producto_por_nombre(producto)
 
 
+# FIX 3: el menú no cambia entre requests. Con ttl=60 se refresca
+# cada minuto automáticamente, pero mientras tanto no toca SQLite.
+@st.cache_data(ttl=60)
 def consultar_menu() -> dict:
     productos = obtener_todos_productos()
     resultado = {
@@ -86,27 +91,54 @@ def _normalizar_items(items: Any) -> List[str]:
     if not items:
         return []
 
+    if isinstance(items, str):
+        partes = re.split(r"(?:\s*,\s*|\s+y\s+|\s+e\s+|\n)+", items, flags=re.IGNORECASE)
+        return [parte.strip(" .;:-") for parte in partes if parte and parte.strip(" .;:-")]
+
+    if isinstance(items, dict):
+        if "items" in items:
+            return _normalizar_items(items.get("items"))
+        nombre = items.get("producto") or items.get("nombre") or items.get("producto_nombre")
+        if nombre:
+            return [str(nombre).strip()]
+        return []
+
     if isinstance(items, list) and all(isinstance(item, str) for item in items):
-        return [item.strip() for item in items if item and item.strip()]
+        return [item.strip(" .;:-") for item in items if item and item.strip(" .;:-")]
 
     if isinstance(items, list):
         nombres: List[str] = []
         for item in items:
+            if isinstance(item, str):
+                nombres.extend(_normalizar_items(item))
+                continue
             if isinstance(item, dict):
+                if "items" in item:
+                    nombres.extend(_normalizar_items(item.get("items")))
+                    continue
                 nombre = item.get("producto") or item.get("nombre") or item.get("producto_nombre")
                 if nombre:
                     nombres.append(str(nombre).strip())
-        return nombres
+
+        normalizados: List[str] = []
+        vistos = set()
+        for nombre in nombres:
+            nombre_limpio = re.sub(r"\s+", " ", str(nombre)).strip(" .;:-")
+            clave = nombre_limpio.lower()
+            if nombre_limpio and clave not in vistos:
+                vistos.add(clave)
+                normalizados.append(nombre_limpio)
+
+        return normalizados
 
     return []
 
 
-def crear_pedido(items: List[Any]) -> dict:
+def crear_pedido(items: Any, telefono: str | None = None, nombre: str | None = None) -> dict:
     items_normalizados = _normalizar_items(items)
     if not items_normalizados:
         return {"error": "La lista de items no puede estar vacía."}
-
-    return crear_nuevo_pedido(items_normalizados)
+    return crear_nuevo_pedido(items_normalizados, cliente_telefono=telefono, cliente_nombre=nombre)
 
 
 def consultar_estado_pedido(pedido_id: str) -> dict:
@@ -132,10 +164,8 @@ def cancelar_pedido(pedido_id: str) -> dict:
     pedido = obtener_pedido(pedido_id)
     if not pedido:
         return {"error": "Pedido no encontrado."}
-
     if pedido["estado"] in ["entregado", "en_ruta"]:
         return {"error": "El pedido ya fue preparado/enviado y no puede cancelarse."}
-
     return actualizar_estado_pedido(pedido_id, "cancelado")
 
 
@@ -146,11 +176,15 @@ def consultar_tiempo_espera() -> dict:
     pedidos_activos = cursor.fetchone()["total"]
     conn.close()
 
-    minutos = 5 + (pedidos_activos * 4)
+    tiempo_base = 5
+    minutos_por_pedido = 4
+    minutos = tiempo_base + (pedidos_activos * minutos_por_pedido)
     return {
         "minutos_espera": minutos,
         "pedidos_activos": pedidos_activos,
-        "mensaje": f"Tiempo estimado: {minutos} minutos.",
+        "tiempo_base": tiempo_base,
+        "minutos_por_pedido": minutos_por_pedido,
+        "mensaje": f"Tiempo estimado: {minutos} minutos. Cálculo: {tiempo_base} minutos base + {minutos_por_pedido} minutos por pedido activo.",
     }
 
 
@@ -158,7 +192,6 @@ def registrar_cliente(nombre: str, telefono: str) -> dict:
     resultado = registrar_cliente_bd(nombre, telefono)
     if "error" in resultado:
         return resultado
-
     return {
         "exito": True,
         "cliente_id": resultado["cliente_id"],
@@ -172,7 +205,6 @@ def consultar_historial_cliente(telefono: str) -> dict:
     resultado = obtener_historial_cliente(telefono)
     if "error" in resultado:
         return resultado
-
     return {
         "cliente_id": resultado["cliente_id"],
         "nombre": resultado["nombre"],
@@ -225,7 +257,6 @@ def obtener_complementos() -> dict:
         for producto in productos
         if producto["tipo"] == "complemento"
     ]
-
     return {
         "complementos": complementos,
         "porciones": "Papas a la francesa (3-4 personas), Salchichas tipo pulpo (2-3 personas)",
@@ -239,11 +270,9 @@ def validar_pago_pedido(pedido_id: str) -> dict:
         "UPDATE pedidos SET pago_validado = 1, estado = 'en_cocina' WHERE pedido_id = ?",
         (pedido_id.strip().upper(),),
     )
-
     if cursor.rowcount == 0:
         conn.close()
         return {"error": "Pedido no encontrado."}
-
     conn.commit()
     conn.close()
     return {"exito": True, "mensaje": f"Pago validado para el pedido {pedido_id}."}
