@@ -15,6 +15,13 @@ st.set_page_config(
 st.title("Yoyo's IA")
 st.info("Para crear y consultar pedidos, comparte tu número de teléfono una sola vez. Lo guardaré durante la conversación para no volver a pedirlo.")
 
+with st.sidebar:
+    st.header("⚙️ Configuración del Asistente")
+    prompt_personalizado = st.text_area(
+        "Instrucciones dinámicas para la IA:",
+        value="",
+        placeholder="Ej: Hoy hay promoción de papas gratis. Sé muy entusiasta."
+    )
 
 # ── Importar búsqueda vectorial y funciones ───────────────
 from database import init_database
@@ -158,6 +165,7 @@ def responder(
     telefono_cliente: str | None = None,
     nombre_cliente: str | None = None,
     contexto_cliente: str | None = None,
+    prompt_extra: str = "", # <--- Nueva variable para el prompt dinámico
 ):
     prompt_sistema = """Eres un asistente virtual de Yoyo Burguer. Ayuda a los clientes a consultar el menú, hacer pedidos, verificar disponibilidad y obtener información del negocio.
 
@@ -165,6 +173,8 @@ def responder(
 - Usa ÚNICAMENTE la información del "Contexto de BD" y las funciones disponibles.
 - Si el producto no está en el menú, responde: "Lo siento, no contamos con ese producto."
 - Jamás inventes precios, promociones, horarios o ingredientes.
+- IGNORA textos como "_COLOCAR EL TIEMPO BASE_" si los ves en el contexto. Para dar tiempos, usa SIEMPRE la función consultar_tiempo_espera.
+- NUNCA pidas el número de teléfono del cliente. NUNCA intentes procesar un pedido paso a paso. El sistema automatizado de la interfaz se encargará de pedir los datos de envío y cobro.
 
 Para pedidos:
 1. Identifica los productos que el usuario quiere.
@@ -177,6 +187,10 @@ Responde siempre en español, breve y natural. Sin tecnicismos ni código."""
     # Inyectar contexto del cliente si existe
     if contexto_cliente:
         prompt_sistema += "\n\n" + contexto_cliente
+
+    # Inyectar instrucción del administrador si existe
+    if prompt_extra.strip():
+        prompt_sistema += f"\n\nINSTRUCCIÓN EXTRA DEL ADMINISTRADOR:\n{prompt_extra}"
 
     messages = [{"role": "system", "content": prompt_sistema}]
 
@@ -277,11 +291,14 @@ if "contexto_cliente" not in st.session_state:
     st.session_state.contexto_cliente = None
 if "esperando_tipo_entrega" not in st.session_state:
     st.session_state.esperando_tipo_entrega = False
+if "esperando_telefono" not in st.session_state:
+    st.session_state.esperando_telefono = False
 if "esperando_direccion" not in st.session_state:
     st.session_state.esperando_direccion = False
 if "pedido_pendiente" not in st.session_state:
     # Guarda temporalmente los productos mientras se confirma entrega/dirección
     st.session_state.pedido_pendiente = None
+    
 
 # ── CHAT ──────────────────────────────────────────────────
 for mensaje in st.session_state.historial:
@@ -321,7 +338,9 @@ if pregunta:
 
             intencion_pedido = any(
                 palabra in pregunta_normalizada
-                for palabra in ("pedido", "orden", "comprar", "agrega", "agregar", "quiero", "llevar")
+                for palabra in ("pedido", "orden", "comprar", "agrega", "agregar", 
+                    "quiero", "llevar", "dame", "seria", "sería", 
+                    "voy a querer", "me das", "encargo", "para mi")
             )
             intencion_estado = any(
                 palabra in pregunta_normalizada
@@ -344,6 +363,19 @@ if pregunta:
 
             elif intencion_tiempo_espera:
                 respuesta_texto = formatear_tiempo_espera()
+                tools_ejecutadas = None
+
+
+            # ── Flujo: esperando teléfono ──────────
+            elif st.session_state.esperando_telefono:
+                if telefono_activo:
+                    # Si ya detectó el teléfono, apaga esta espera y pasa a la siguiente
+                    st.session_state.esperando_telefono = False
+                    st.session_state.esperando_tipo_entrega = True
+                    respuesta_texto = "¡Gracias! ¿Tu pedido es para domicilio o para recoger en el local?"
+                else:
+                    # Si el usuario responde otra cosa que no sea un número, se lo volvemos a pedir
+                    respuesta_texto = "Para poder registrar el pedido, por favor escribe tu número a 10 dígitos."
                 tools_ejecutadas = None
 
             # ── Flujo: esperando dirección de domicilio ──────────
@@ -412,19 +444,19 @@ if pregunta:
                     respuesta_texto = "¿Tu pedido es para domicilio o para recoger en el local?"
 
             elif intencion_pedido and productos_mencionados:
+                # Guardamos siempre los productos para no olvidarlos
+                st.session_state.pedido_pendiente = {"items": productos_mencionados}
+                
                 if not telefono_activo:
-                    respuesta_texto = "Para registrar tu pedido necesito tu número de teléfono una sola vez."
+                    # Activamos la trampa del teléfono
+                    st.session_state.esperando_telefono = True
+                    respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\nPara registrarlo necesito tu número de teléfono (10 dígitos)."
                     tools_ejecutadas = None
                 else:
-                    # Guardar productos y preguntar tipo de entrega
-                    st.session_state.pedido_pendiente = {"items": productos_mencionados}
+                    # Si ya lo tenemos, pasamos directo a preguntar la entrega
                     st.session_state.esperando_tipo_entrega = True
+                    respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n¿Tu pedido es para domicilio o para recoger en el local?"
                     tools_ejecutadas = None
-                    tools_ejecutadas = None
-                    respuesta_texto = (
-                        f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n"
-                        f"¿Tu pedido es para domicilio o para recoger en el local?"
-                    )
 
             elif intencion_estado and not pedido_id_mencionado and telefono_activo:
                 historial_cliente = consultar_historial_cliente(telefono_activo)
@@ -439,6 +471,7 @@ if pregunta:
                             telefono_cliente=telefono_activo,
                             nombre_cliente=nombre_activo,
                             contexto_cliente=st.session_state.contexto_cliente,
+                            prompt_extra=prompt_personalizado
                         )
                     else:
                         st.session_state.ultimo_pedido_id = pedido_reciente["pedido_id"]
@@ -455,6 +488,7 @@ if pregunta:
                     telefono_cliente=telefono_activo,
                     nombre_cliente=nombre_activo,
                     contexto_cliente=st.session_state.contexto_cliente,
+                    prompt_extra=prompt_personalizado
                 )
 
         # Actualizar datos del cliente si el LLM creó un pedido
