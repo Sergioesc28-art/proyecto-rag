@@ -224,6 +224,8 @@ def crear_nuevo_pedido(
     items_lista: List[str],
     cliente_telefono: Optional[str] = None,
     cliente_nombre: Optional[str] = None,
+    tipo_entrega: str = "presencial",
+    direccion: Optional[str] = None,
 ) -> Dict[str, Any]:
     conn = get_connection()
     try:
@@ -255,21 +257,31 @@ def crear_nuevo_pedido(
             return {"error": f"Total ${round(total_productos, 2)} MXN supera el máximo permitido."}
 
         pedido_id = f"PED-{uuid.uuid4().hex[:8].upper()}"
+        costo_envio = 10.0 if tipo_entrega == "domicilio" else 0.0
+        total_con_envio = round(total_productos + costo_envio, 2)
+
         cursor.execute(
             """
             INSERT INTO pedidos (
                 pedido_id, cliente_telefono, tipo_entrega, direccion_entrega,
                 costo_envio, metodo_pago, pago_validado,
                 total_productos, total_envio, descuento, total_final, estado
-            ) VALUES (%s, %s, 'presencial', NULL, 0, 'efectivo', 0, %s, 0, 0, %s, 'pendiente_validacion')
+            ) VALUES (%s, %s, %s, %s, %s, 'efectivo', 0, %s, %s, 0, %s, 'pendiente_validacion')
             """,
-            (pedido_id, cliente_telefono_limpio or None, total_productos, total_productos)
+            (pedido_id, cliente_telefono_limpio or None, tipo_entrega, direccion, costo_envio, total_productos, costo_envio, total_con_envio)
         )
 
         for producto in productos_validos:
             cursor.execute(
                 "INSERT INTO pedido_items (pedido_id, producto_id, cantidad, precio_unitario_base) VALUES (%s, %s, 1, %s)",
                 (pedido_id, producto["id"], float(producto["precio_base"]))
+            )
+
+        # Guardar dirección si es domicilio
+        if tipo_entrega == "domicilio" and direccion and cliente_telefono_limpio:
+            cursor.execute(
+                "UPDATE clientes SET direccion = %s WHERE telefono = %s",
+                (direccion.strip(), cliente_telefono_limpio)
             )
 
         conn.commit()
@@ -279,8 +291,11 @@ def crear_nuevo_pedido(
             "cliente_telefono": cliente_telefono_limpio or None,
             "cliente_nombre": (cliente_nombre.strip() if isinstance(cliente_nombre, str) and cliente_nombre.strip() else None),
             "items": [p["nombre"] for p in productos_validos],
-            "total": round(total_productos, 2),
-            "total_final": round(total_productos, 2),
+            "tipo_entrega": tipo_entrega,
+            "direccion": direccion,
+            "total_productos": round(total_productos, 2),
+            "costo_envio": costo_envio,
+            "total_final": total_con_envio,
             "estado": "pendiente_validacion",
         }
     except Exception as e:
@@ -362,15 +377,53 @@ def obtener_historial_cliente(telefono: str) -> Dict[str, Any]:
             """,
             (telefono_limpio,)
         )
-        pedidos = [dict(fila) for fila in cursor.fetchall()]
+        pedidos_raw = cursor.fetchall()
+
+        pedidos = []
+        for pedido in pedidos_raw:
+            p = dict(pedido)
+            cursor.execute(
+                """
+                SELECT p.nombre AS producto_nombre, pi.cantidad
+                FROM pedido_items pi
+                INNER JOIN productos p ON p.id = pi.producto_id
+                WHERE pi.pedido_id = %s
+                """,
+                (p["pedido_id"],)
+            )
+            p["items"] = [dict(fila) for fila in cursor.fetchall()]
+            pedidos.append(p)
+
         return {
             "cliente_id": cliente["telefono"],
             "nombre": cliente["nombre"],
             "telefono": cliente["telefono"],
+            "direccion": cliente.get("direccion"),
             "total_pedidos": len(pedidos),
             "pedidos": pedidos,
         }
     except Exception as e:
+        return {"error": str(e)}
+    finally:
+        release_connection(conn)
+
+
+def actualizar_direccion_cliente(telefono: str, direccion: str) -> Dict[str, Any]:
+    """Guarda o actualiza la dirección de un cliente en Supabase."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        telefono_limpio = _normalizar_telefono(telefono)
+        cursor.execute(
+            "UPDATE clientes SET direccion = %s WHERE telefono = %s",
+            (direccion.strip(), telefono_limpio)
+        )
+        if cursor.rowcount == 0:
+            return {"error": "Cliente no encontrado."}
+        conn.commit()
+        return {"exito": True, "direccion": direccion.strip()}
+    except Exception as e:
+        conn.rollback()
         return {"error": str(e)}
     finally:
         release_connection(conn)

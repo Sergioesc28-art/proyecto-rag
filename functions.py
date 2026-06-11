@@ -15,6 +15,7 @@ from database import (
     obtener_todos_productos,
     registrar_cliente_bd,
     actualizar_estado_pedido,
+    actualizar_direccion_cliente,
 )
 
 
@@ -134,11 +135,28 @@ def _normalizar_items(items: Any) -> List[str]:
     return []
 
 
-def crear_pedido(items: Any, telefono: str | None = None, nombre: str | None = None) -> dict:
+def crear_pedido(
+    items: Any,
+    telefono: str | None = None,
+    nombre: str | None = None,
+    tipo_entrega: str = "presencial",
+    direccion: str | None = None,
+) -> dict:
     items_normalizados = _normalizar_items(items)
     if not items_normalizados:
         return {"error": "La lista de items no puede estar vacía."}
-    return crear_nuevo_pedido(items_normalizados, cliente_telefono=telefono, cliente_nombre=nombre)
+    return crear_nuevo_pedido(
+        items_normalizados,
+        cliente_telefono=telefono,
+        cliente_nombre=nombre,
+        tipo_entrega=tipo_entrega,
+        direccion=direccion,
+    )
+
+
+def guardar_direccion_cliente(telefono: str, direccion: str) -> dict:
+    """Guarda la dirección del cliente en Supabase."""
+    return actualizar_direccion_cliente(telefono, direccion)
 
 
 def consultar_estado_pedido(pedido_id: str) -> dict:
@@ -276,3 +294,53 @@ def validar_pago_pedido(pedido_id: str) -> dict:
     conn.commit()
     conn.close()
     return {"exito": True, "mensaje": f"Pago validado para el pedido {pedido_id}."}
+
+
+def obtener_contexto_cliente(telefono: str) -> str:
+    """
+    Arma un string de contexto personalizado del cliente para inyectar
+    en el system prompt. Se llama una sola vez cuando el cliente da su
+    teléfono y se guarda en st.session_state.contexto_cliente.
+    """
+    from collections import Counter
+
+    resultado = obtener_historial_cliente(telefono)
+
+    if "error" in resultado:
+        return f"Cliente nuevo (teléfono: {telefono}). Sin historial previo."
+
+    nombre    = resultado.get("nombre", "Cliente")
+    direccion = resultado.get("direccion") or "No registrada"
+    total     = resultado.get("total_pedidos", 0)
+    pedidos   = resultado.get("pedidos", [])
+
+    # Últimos 4 pedidos
+    ultimos = pedidos[:4]
+    lineas_pedidos = [
+        f"  - {p['pedido_id']}: ${p['total_final']} MXN | estado: {p['estado']}"
+        for p in ultimos
+    ] or ["  - Sin pedidos previos"]
+
+    # Productos favoritos (top 3 más pedidos)
+    conteo: Counter = Counter()
+    for p in pedidos:
+        for item in p.get("items", []):
+            nombre_item = item.get("producto_nombre", "")
+            if nombre_item:
+                conteo[nombre_item] += item.get("cantidad", 1)
+
+    favoritos = (
+        ", ".join(f"{prod} (x{cnt})" for prod, cnt in conteo.most_common(3))
+        if conteo else "Sin datos suficientes"
+    )
+
+    return (
+        f"=== CONTEXTO DEL CLIENTE ===\n"
+        f"Nombre: {nombre}\n"
+        f"Teléfono: {telefono}\n"
+        f"Dirección: {direccion}\n"
+        f"Total de pedidos históricos: {total}\n"
+        f"Últimos 4 pedidos:\n" + "\n".join(lineas_pedidos) + "\n"
+        f"Productos favoritos: {favoritos}\n"
+        f"==========================="
+    )

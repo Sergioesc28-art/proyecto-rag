@@ -31,11 +31,12 @@ from functions import (
     consultar_historial_cliente,
     obtener_informacion_yoyo,
     obtener_complementos,
-    validar_pago_pedido
+    validar_pago_pedido,
+    obtener_contexto_cliente,
+    guardar_direccion_cliente,
 )
 
 init_database()
-
 
 LLAMA_URL = os.getenv("LLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
 
@@ -67,12 +68,10 @@ def ejecutar_funcion(nombre_funcion: str, argumentos: dict) -> dict:
             "error": f"La acción '{nombre_funcion}' no existe.",
             "funciones_disponibles": list(FUNCIONES_DISPONIBLES.keys())
         }
-    
     try:
         funcion = FUNCIONES_DISPONIBLES[nombre_funcion]
         resultado = funcion(**argumentos)
         return {"exito": True, "resultado": resultado}
-    
     except Exception as e:
         return {
             "error": f"Error ejecutando {nombre_funcion}: {str(e)}",
@@ -119,12 +118,9 @@ def normalizar_texto_busqueda(texto: str) -> str:
 
 
 def extraer_productos_mencionados(texto: str) -> list[str]:
-    # FIX 3: consultar_menu() ya tiene @st.cache_data en functions.py,
-    # por lo que esta llamada no golpea SQLite en cada request.
     menu = consultar_menu()
     productos = menu["hamburguesas"] + menu["hot_dogs"] + menu["complementos"]
     texto_normalizado = normalizar_texto_busqueda(texto)
-
     encontrados: list[str] = []
     for producto in productos:
         nombre_normalizado = normalizar_texto_busqueda(producto["nombre"])
@@ -153,70 +149,50 @@ def formatear_tiempo_espera() -> str:
 
 
 # ── Llamada a Llama con herramientas ──────────────────────
-# FIX 4: se limita el historial a los últimos MAX_HISTORIAL mensajes
-# para que el prompt no crezca indefinidamente con cada turno.
 MAX_HISTORIAL = 10
 
 def responder(
     pregunta: str,
     historial: list,
-    contexto_rag: str,                      # FIX 2: ahora es obligatorio, siempre se recibe desde afuera
+    contexto_rag: str,
     telefono_cliente: str | None = None,
     nombre_cliente: str | None = None,
+    contexto_cliente: str | None = None,
 ):
-    # contexto_rag ya viene calculado desde el bloque principal,
-    # por lo que NO se vuelve a llamar buscar_contexto() aquí.
+    prompt_sistema = """Eres un asistente virtual de Yoyo Burguer. Ayuda a los clientes a consultar el menú, hacer pedidos, verificar disponibilidad y obtener información del negocio.
 
-    prompt_sistema = """Eres un asistente virtual automatizado y estricto de Yoyo Burguer. 
+⚠️ REGLAS:
+- Usa ÚNICAMENTE la información del "Contexto de BD" y las funciones disponibles.
+- Si el producto no está en el menú, responde: "Lo siento, no contamos con ese producto."
+- Jamás inventes precios, promociones, horarios o ingredientes.
 
-Tu objetivo es ayudar a los clientes a:
-- Consultar el menú
-- Hacer pedidos
-- Verificar disponibilidad
-- Registrarse como cliente
-- Obtener información del negocio
+Para pedidos:
+1. Identifica los productos que el usuario quiere.
+2. Si no tienes teléfono, pídelo: "¿Me das tu número de teléfono para registrar el pedido?"
+3. Con teléfono y productos, llama a crear_pedido de inmediato.
+4. No pidas confirmación de lo que ya te dijeron.
 
-⚠️ REGLA DE ORO DE SEGURIDAD (ANTI-ALUCINACIÓN):
-- Básate ÚNICAMENTE en la información proporcionada en el "Contexto de BD" y en las funciones del sistema.
-- Si el usuario te pide un producto, ingrediente o servicio que NO está explícitamente en el menú o en el contexto, debes responder amablemente: "Lo siento, no contamos con ese producto en nuestro menú actual".
-- Jamás inventes precios, promociones, horarios, ingredientes o respuestas que no estén respaldadas por la base de datos.
-- No asumas nada fuera de lo que se te ha entregado textualmente.
+Responde siempre en español, breve y natural. Sin tecnicismos ni código."""
 
-Si el usuario quiere hacer un pedido, tu objetivo es llamar a la función `crear_pedido`.
-Para ello, sigue estos pasos de forma proactiva:
-1. Identifica los productos que el usuario quiere en su pedido a partir de la conversación.
-2. Verifica si tienes un número de teléfono. Un pedido necesita un cliente. Revisa el historial de la conversación para ver si el usuario ya lo ha proporcionado.
-3. Si no tienes el teléfono, pídelo amablemente. Di algo como: "¡Claro! Para registrar tu pedido, ¿me podrías dar tu número de teléfono, por favor?".
-4. Una vez que tengas el teléfono y los productos, actúa. No vuelvas a preguntar. Llama a la función `crear_pedido` con los productos. Si el usuario ya dio su teléfono en esta conversación, reutilízalo siempre.
-5. No dudes ni pidas confirmación de nuevo sobre lo que ya te dijeron. Asume que la información que te dan es para que la uses.
-
-Nunca menciones nombres internos de funciones, herramientas, JSON, parámetros ni pasos técnicos.
-Nunca le indiques al usuario que escriba un comando o que use un flujo interno.
-Si una consulta puede resolverse con una acción interna, ejecútala sin explicarla.
-Si no puede resolverse con acciones internas, usa el contexto RAG.
-Responde siempre en español claro, breve y natural.
-No muestres código, pseudocódigo, JSON, ni instrucciones técnicas.
-No uses lenguaje de programación como `const`, `await`, `console.log` o similar.
-Siempre sé amable y útil."""
+    # Inyectar contexto del cliente si existe
+    if contexto_cliente:
+        prompt_sistema += "\n\n" + contexto_cliente
 
     messages = [{"role": "system", "content": prompt_sistema}]
 
-    # FIX 4: solo enviamos los últimos MAX_HISTORIAL mensajes al LLM,
-    # excluyendo el último que es la pregunta actual (que se agrega abajo).
     historial_reciente = historial[-(MAX_HISTORIAL + 1):-1]
     for msg in historial_reciente:
         messages.append({"role": msg["rol"], "content": msg["texto"]})
 
-    # Pregunta actual con el contexto RAG ya calculado
     messages.append({"role": "user", "content": f"Contexto de BD:\n{contexto_rag}\n\nPregunta: {pregunta}"})
 
     payload = {
-        "model": "mistral",
+        "model": "qwen2.5:3b",
         "messages": messages,
         "tools": TOOLS_SCHEMA,
         "tool_choice": "auto",
         "temperature": 0.1,
-        "max_tokens": 1024,
+        "max_tokens": 512,
         "stream": False
     }
 
@@ -259,7 +235,6 @@ Siempre sé amable y útil."""
             })
 
         mensajes_segunda_ronda = messages + [mensaje_respuesta]
-
         for tool_result in resultados_tools:
             mensajes_segunda_ronda.append({
                 "role": "tool",
@@ -268,15 +243,14 @@ Siempre sé amable y útil."""
             })
 
         payload_segunda = {
-            "model": "mistral",
+            "model": "qwen2.5:3b",
             "messages": mensajes_segunda_ronda,
             "temperature": 0.1,
-            "max_tokens": 1024,
+            "max_tokens": 512,
             "stream": False
         }
 
         try:
-            # FIX 5: timeout reducido a 60s. 300s era demasiado sin feedback al usuario.
             respuesta_final = requests.post(LLAMA_URL, json=payload_segunda, timeout=60)
             resultado_final = respuesta_final.json()
             texto_respuesta = resultado_final["choices"][0]["message"]["content"]
@@ -293,211 +267,213 @@ Siempre sé amable y útil."""
 # ── Historial de conversación ─────────────────────────────
 if "historial" not in st.session_state:
     st.session_state.historial = []
-
 if "cliente_telefono" not in st.session_state:
     st.session_state.cliente_telefono = None
-
 if "cliente_nombre" not in st.session_state:
     st.session_state.cliente_nombre = None
-
 if "ultimo_pedido_id" not in st.session_state:
     st.session_state.ultimo_pedido_id = None
+if "contexto_cliente" not in st.session_state:
+    st.session_state.contexto_cliente = None
+if "esperando_tipo_entrega" not in st.session_state:
+    st.session_state.esperando_tipo_entrega = False
+if "esperando_direccion" not in st.session_state:
+    st.session_state.esperando_direccion = False
+if "pedido_pendiente" not in st.session_state:
+    # Guarda temporalmente los productos mientras se confirma entrega/dirección
+    st.session_state.pedido_pendiente = None
 
-# ── Creación de columnas en la interfaz ────────────────────
-col_chat, col_tools = st.columns([3, 1])
+# ── CHAT ──────────────────────────────────────────────────
+for mensaje in st.session_state.historial:
+    with st.chat_message(mensaje["rol"]):
+        st.write(mensaje["texto"])
 
-# ── LÓGICA DE LA COLUMNA DEL CHAT (Izquierda) ──────────────
-with col_chat:
-    # 1. Mostrar historial guardado PRIMERO
-    for mensaje in st.session_state.historial:
-        with st.chat_message(mensaje["rol"]):
-            st.write(mensaje["texto"])
+pregunta = st.chat_input("Escribe tu pregunta...")
 
-            if "tools_ejecutadas" in mensaje and mensaje["tools_ejecutadas"]:
-                with st.expander("🔧 Acciones ejecutadas"):
-                    for tool in mensaje["tools_ejecutadas"]:
-                        st.write(f"**Parámetros**: {tool['arguments']}")
-                        if "error" in tool["result"]:
-                            st.error(f"Error: {tool['result']['error']}")
-                        elif tool["result"].get("exito"):
-                            st.json(tool["result"]["resultado"])
+if pregunta:
+    telefono_mencionado = extraer_telefono(pregunta)
+    if telefono_mencionado:
+        st.session_state.cliente_telefono = telefono_mencionado
+        # Generar contexto del cliente una sola vez al detectar su teléfono
+        st.session_state.contexto_cliente = obtener_contexto_cliente(telefono_mencionado)
 
-    # 2. El input del usuario se coloca DESPUÉS del historial
-    pregunta = st.chat_input("Escribe tu pregunta...")
+    nombre_mencionado = extraer_nombre_cliente(pregunta)
+    if nombre_mencionado:
+        st.session_state.cliente_nombre = nombre_mencionado
 
-    # 3. Procesar la nueva pregunta si existe
-    if pregunta:
-        telefono_mencionado = extraer_telefono(pregunta)
-        if telefono_mencionado:
-            st.session_state.cliente_telefono = telefono_mencionado
+    telefono_activo = st.session_state.cliente_telefono
+    nombre_activo = st.session_state.cliente_nombre
 
-        nombre_mencionado = extraer_nombre_cliente(pregunta)
-        if nombre_mencionado:
-            st.session_state.cliente_nombre = nombre_mencionado
+    with st.chat_message("user"):
+        st.write(pregunta)
 
-        telefono_activo = st.session_state.cliente_telefono
-        nombre_activo = st.session_state.cliente_nombre
+    st.session_state.historial.append({
+        "rol": "user",
+        "texto": pregunta,
+        "tools_ejecutadas": None
+    })
 
-        with st.chat_message("user"):
-            st.write(pregunta)
+    with st.chat_message("assistant"):
+        with st.spinner("Procesando..."):
+            contexto_calculado = buscar_contexto(pregunta)
+            productos_mencionados = extraer_productos_mencionados(pregunta)
+            pregunta_normalizada = normalizar_texto_busqueda(pregunta)
 
-        st.session_state.historial.append({
-            "rol": "user",
-            "texto": pregunta,
-            "tools_ejecutadas": None
-        })
+            intencion_pedido = any(
+                palabra in pregunta_normalizada
+                for palabra in ("pedido", "orden", "comprar", "agrega", "agregar", "quiero", "llevar")
+            )
+            intencion_estado = any(
+                palabra in pregunta_normalizada
+                for palabra in ("estado", "status", "seguimiento", "consultar")
+            )
+            intencion_menu_hamburguesas = any(
+                frase in pregunta_normalizada
+                for frase in ("menu de hamburguesas", "menu hamburguesas", "hamburguesas", "hambuerguesas")
+            )
+            intencion_tiempo_espera = any(
+                frase in pregunta_normalizada
+                for frase in ("tiempo de espera", "tiempos de espera", "cuanto tarda", "cuanto tiempo")
+            )
 
-        with st.chat_message("assistant"):
-            with st.spinner("Procesando..."):
+            pedido_id_mencionado = re.search(r"\bPED-[A-Z0-9]{8}\b", pregunta, flags=re.IGNORECASE)
 
-                # FIX 2: buscar_contexto() se llama UNA SOLA VEZ aquí.
-                # Se guarda en contexto_calculado y se reutiliza en todo el bloque,
-                # incluyendo la llamada a responder() y el expander de RAG al final.
-                contexto_calculado = buscar_contexto(pregunta)
+            if intencion_menu_hamburguesas:
+                respuesta_texto = formatear_menu_hamburguesas()
+                tools_ejecutadas = None
 
-                productos_mencionados = extraer_productos_mencionados(pregunta)
-                pregunta_normalizada = normalizar_texto_busqueda(pregunta)
+            elif intencion_tiempo_espera:
+                respuesta_texto = formatear_tiempo_espera()
+                tools_ejecutadas = None
 
-                intencion_pedido = any(
-                    palabra in pregunta_normalizada
-                    for palabra in ("pedido", "orden", "comprar", "agrega", "agregar", "quiero", "llevar")
+            # ── Flujo: esperando dirección de domicilio ──────────
+            elif st.session_state.esperando_direccion:
+                direccion = pregunta.strip()
+                pedido_info = st.session_state.pedido_pendiente
+                resultado_pedido = crear_pedido(
+                    pedido_info["items"],
+                    telefono=telefono_activo,
+                    nombre=nombre_activo,
+                    tipo_entrega="domicilio",
+                    direccion=direccion,
                 )
-                intencion_estado = any(
-                    palabra in pregunta_normalizada
-                    for palabra in ("estado", "status", "seguimiento", "consultar")
-                )
-                intencion_menu_hamburguesas = any(
-                    frase in pregunta_normalizada
-                    for frase in (
-                        "menu de hamburguesas",
-                        "menu hamburguesas",
-                        "menu de hambuerguesas",
-                        "menu hambuerguesas",
-                        "hamburguesas",
-                        "hambuerguesas",
-                    )
-                )
-                intencion_tiempo_espera = any(
-                    frase in pregunta_normalizada
-                    for frase in (
-                        "tiempo de espera",
-                        "tiempos de espera",
-                        "cuanto tarda",
-                        "cuanto tiempo",
-                        "dura la peticion",
-                    )
-                )
-
-                pedido_id_mencionado = re.search(r"\bPED-[A-Z0-9]{8}\b", pregunta, flags=re.IGNORECASE)
-
-                if intencion_menu_hamburguesas:
-                    respuesta_texto = formatear_menu_hamburguesas()
-                    tools_ejecutadas = [{
-                        "tool_name": "consultar_menu",
-                        "arguments": {},
-                        "result": {"exito": True, "resultado": consultar_menu()}
-                    }]
-
-                elif intencion_tiempo_espera:
-                    respuesta_texto = formatear_tiempo_espera()
-                    tools_ejecutadas = [{
-                        "tool_name": "consultar_tiempo_espera",
-                        "arguments": {},
-                        "result": {"exito": True, "resultado": consultar_tiempo_espera()}
-                    }]
-
-                elif intencion_pedido and productos_mencionados:
-                    if not telefono_activo:
-                        respuesta_texto = "Para registrar tu pedido necesito tu número de teléfono una sola vez."
-                        tools_ejecutadas = None
-                    else:
-                        resultado_pedido = crear_pedido(productos_mencionados, telefono=telefono_activo, nombre=nombre_activo)
-                        if "error" in resultado_pedido:
-                            respuesta_texto = resultado_pedido["error"]
-                            tools_ejecutadas = [{
-                                "tool_name": "crear_pedido",
-                                "arguments": {"items": productos_mencionados, "telefono": telefono_activo, "nombre": nombre_activo},
-                                "result": resultado_pedido,
-                            }]
-                        else:
-                            st.session_state.ultimo_pedido_id = resultado_pedido.get("pedido_id")
-                            respuesta_texto = f"Pedido registrado con éxito. Total: ${resultado_pedido['total_final']} MXN."
-                            tools_ejecutadas = [{
-                                "tool_name": "crear_pedido",
-                                "arguments": {"items": productos_mencionados, "telefono": telefono_activo, "nombre": nombre_activo},
-                                "result": {"exito": True, "resultado": resultado_pedido}
-                            }]
-
-                elif intencion_estado and not pedido_id_mencionado and telefono_activo:
-                    historial_cliente = consultar_historial_cliente(telefono_activo)
-                    pedidos = historial_cliente.get("pedidos", []) if isinstance(historial_cliente, dict) else []
-
-                    if pedidos:
-                        pedido_reciente = pedidos[0]
-                        estado_pedido = consultar_estado_pedido(pedido_reciente["pedido_id"])
-                        if "error" in estado_pedido:
-                            # Si falla, caemos al LLM pasando el contexto ya calculado
-                            respuesta_texto, tools_ejecutadas = responder(
-                                pregunta,
-                                st.session_state.historial,
-                                contexto_rag=contexto_calculado,
-                                telefono_cliente=telefono_activo,
-                                nombre_cliente=nombre_activo,
-                            )
-                        else:
-                            st.session_state.ultimo_pedido_id = pedido_reciente["pedido_id"]
-                            respuesta_texto = f"Tu pedido más reciente está en estado {estado_pedido['estado']}."
-                            tools_ejecutadas = [{
-                                "tool_name": "consultar_estado_pedido",
-                                "arguments": {"pedido_id": pedido_reciente["pedido_id"]},
-                                "result": {"exito": True, "resultado": estado_pedido}
-                            }]
-                    else:
-                        respuesta_texto = "No encuentro un pedido previo asociado a ese teléfono."
-                        tools_ejecutadas = None
-
+                st.session_state.esperando_direccion = False
+                st.session_state.pedido_pendiente = None
+                tools_ejecutadas = None
+                if "error" in resultado_pedido:
+                    respuesta_texto = resultado_pedido["error"]
                 else:
-                    # Caso general: pasa el contexto ya calculado, sin recalcularlo
-                    respuesta_texto, tools_ejecutadas = responder(
-                        pregunta,
-                        st.session_state.historial,
-                        contexto_rag=contexto_calculado,
-                        telefono_cliente=telefono_activo,
-                        nombre_cliente=nombre_activo,
+                    st.session_state.ultimo_pedido_id = resultado_pedido.get("pedido_id")
+                    # Actualizar contexto del cliente con la nueva dirección
+                    if telefono_activo:
+                        st.session_state.contexto_cliente = obtener_contexto_cliente(telefono_activo)
+                    respuesta_texto = (
+                        f"¡Pedido registrado! 🎉\n"
+                        f"📦 Entrega a domicilio en: {direccion}\n"
+                        f"🧾 Total productos: ${resultado_pedido['total_productos']} MXN\n"
+                        f"🚚 Costo de envío: ${resultado_pedido['costo_envio']} MXN\n"
+                        f"💰 Total final: ${resultado_pedido['total_final']} MXN\n"
+                        f"🔖 ID de pedido: {resultado_pedido['pedido_id']}"
                     )
 
-            # ── Actualizar estado del pedido si aplica ────────
-            if tools_ejecutadas:
-                for tool in tools_ejecutadas:
-                    if tool["tool_name"] == "crear_pedido" and tool["result"].get("exito"):
-                        resultado_tool = tool["result"].get("resultado", {})
-                        if isinstance(resultado_tool, dict):
-                            st.session_state.ultimo_pedido_id = resultado_tool.get("pedido_id")
-                            if resultado_tool.get("cliente_telefono"):
-                                st.session_state.cliente_telefono = resultado_tool.get("cliente_telefono")
-                            if resultado_tool.get("cliente_nombre"):
-                                st.session_state.cliente_nombre = resultado_tool.get("cliente_nombre")
+            # ── Flujo: esperando tipo de entrega ─────────────────
+            elif st.session_state.esperando_tipo_entrega:
+                pregunta_norm = normalizar_texto_busqueda(pregunta)
+                es_domicilio = any(p in pregunta_norm for p in ("domicilio", "a casa", "envio", "envío", "entregar", "llevar"))
+                es_local = any(p in pregunta_norm for p in ("local", "recoger", "ahi", "ahí", "presencial", "yo paso", "voy"))
+                tools_ejecutadas = None
 
-            # ── Mostrar respuesta ─────────────────────────────
-            respuesta_sanitizada = sanitizar_respuesta(respuesta_texto)
-            st.write(respuesta_sanitizada)
+                if es_domicilio:
+                    st.session_state.esperando_tipo_entrega = False
+                    st.session_state.esperando_direccion = True
+                    respuesta_texto = "¡Perfecto! ¿Cuál es tu dirección de entrega?"
 
-            if tools_ejecutadas:
-                with st.expander("🔧 Acciones ejecutadas en esta respuesta"):
-                    for tool in tools_ejecutadas:
-                        st.write(f"**Parámetros**: {tool['arguments']}")
-                        if "error" in tool["result"]:
-                            st.error(f"❌ {tool['result']['error']}")
-                        elif tool["result"].get("exito"):
-                            st.success("✅ Ejecución exitosa")
-                            st.json(tool["result"]["resultado"])
+                elif es_local:
+                    pedido_info = st.session_state.pedido_pendiente
+                    resultado_pedido = crear_pedido(
+                        pedido_info["items"],
+                        telefono=telefono_activo,
+                        nombre=nombre_activo,
+                        tipo_entrega="presencial",
+                    )
+                    st.session_state.esperando_tipo_entrega = False
+                    st.session_state.pedido_pendiente = None
+                    if "error" in resultado_pedido:
+                        respuesta_texto = resultado_pedido["error"]
+                    else:
+                        st.session_state.ultimo_pedido_id = resultado_pedido.get("pedido_id")
+                        respuesta_texto = (
+                            f"¡Pedido registrado! 🎉\n"
+                            f"🏠 Para recoger en local\n"
+                            f"💰 Total: ${resultado_pedido['total_final']} MXN\n"
+                            f"🔖 ID de pedido: {resultado_pedido['pedido_id']}"
+                        )
+                else:
+                    respuesta_texto = "¿Tu pedido es para domicilio o para recoger en el local?"
 
-            # FIX 2: reutiliza contexto_calculado, NO llama buscar_contexto() de nuevo
-            with st.expander("📚 Contexto RAG utilizado"):
-                st.text(contexto_calculado)
+            elif intencion_pedido and productos_mencionados:
+                if not telefono_activo:
+                    respuesta_texto = "Para registrar tu pedido necesito tu número de teléfono una sola vez."
+                    tools_ejecutadas = None
+                else:
+                    # Guardar productos y preguntar tipo de entrega
+                    st.session_state.pedido_pendiente = {"items": productos_mencionados}
+                    st.session_state.esperando_tipo_entrega = True
+                    tools_ejecutadas = None
+                    tools_ejecutadas = None
+                    respuesta_texto = (
+                        f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n"
+                        f"¿Tu pedido es para domicilio o para recoger en el local?"
+                    )
 
-        st.session_state.historial.append({
-            "rol": "assistant",
-            "texto": respuesta_sanitizada,
-            "tools_ejecutadas": tools_ejecutadas
-        })
+            elif intencion_estado and not pedido_id_mencionado and telefono_activo:
+                historial_cliente = consultar_historial_cliente(telefono_activo)
+                pedidos = historial_cliente.get("pedidos", []) if isinstance(historial_cliente, dict) else []
+                if pedidos:
+                    pedido_reciente = pedidos[0]
+                    estado_pedido = consultar_estado_pedido(pedido_reciente["pedido_id"])
+                    if "error" in estado_pedido:
+                        respuesta_texto, tools_ejecutadas = responder(
+                            pregunta, st.session_state.historial,
+                            contexto_rag=contexto_calculado,
+                            telefono_cliente=telefono_activo,
+                            nombre_cliente=nombre_activo,
+                            contexto_cliente=st.session_state.contexto_cliente,
+                        )
+                    else:
+                        st.session_state.ultimo_pedido_id = pedido_reciente["pedido_id"]
+                        respuesta_texto = f"Tu pedido más reciente ({pedido_reciente['pedido_id']}) está en estado: **{estado_pedido['estado']}**."
+                        tools_ejecutadas = None
+                else:
+                    respuesta_texto = "No encuentro pedidos previos asociados a tu teléfono."
+                    tools_ejecutadas = None
+
+            else:
+                respuesta_texto, tools_ejecutadas = responder(
+                    pregunta, st.session_state.historial,
+                    contexto_rag=contexto_calculado,
+                    telefono_cliente=telefono_activo,
+                    nombre_cliente=nombre_activo,
+                    contexto_cliente=st.session_state.contexto_cliente,
+                )
+
+        # Actualizar datos del cliente si el LLM creó un pedido
+        if tools_ejecutadas:
+            for tool in tools_ejecutadas:
+                if tool["tool_name"] == "crear_pedido" and tool["result"].get("exito"):
+                    resultado_tool = tool["result"].get("resultado", {})
+                    if isinstance(resultado_tool, dict):
+                        st.session_state.ultimo_pedido_id = resultado_tool.get("pedido_id")
+                        if resultado_tool.get("cliente_telefono"):
+                            st.session_state.cliente_telefono = resultado_tool.get("cliente_telefono")
+                        if resultado_tool.get("cliente_nombre"):
+                            st.session_state.cliente_nombre = resultado_tool.get("cliente_nombre")
+
+        respuesta_sanitizada = sanitizar_respuesta(respuesta_texto)
+        st.write(respuesta_sanitizada)
+
+    st.session_state.historial.append({
+        "rol": "assistant",
+        "texto": respuesta_sanitizada,
+        "tools_ejecutadas": tools_ejecutadas
+    })
