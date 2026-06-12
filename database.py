@@ -192,8 +192,9 @@ def obtener_pedido(pedido_id: str) -> Optional[Dict[str, Any]]:
         release_connection(conn)
 
 
-def _asegurar_cliente(cursor, telefono: str, nombre: str = "Cliente") -> str:
+def _asegurar_cliente(cursor, telefono: str, nombre: str = "Cliente", numero_contacto: str = None) -> str:
     telefono_limpio = _normalizar_telefono(telefono)
+    contacto_limpio = _normalizar_telefono(numero_contacto) if numero_contacto else telefono_limpio
     if not telefono_limpio:
         return ""
 
@@ -206,16 +207,21 @@ def _asegurar_cliente(cursor, telefono: str, nombre: str = "Cliente") -> str:
         nombre_limpio = nombre.strip()
         if nombre_limpio and nombre_limpio.lower() != "cliente":
             cursor.execute(
-                """UPDATE clientes SET nombre = %s
-                   WHERE telefono = %s
-                   AND (nombre IS NULL OR TRIM(nombre) = '' OR LOWER(nombre) = 'cliente')""",
-                (nombre_limpio, telefono_limpio)
+                """UPDATE clientes SET nombre = %s, numero_contacto_llamada = %s
+                   WHERE telefono = %s""",
+                (nombre_limpio, contacto_limpio, telefono_limpio)
+            )
+        else:
+            cursor.execute(
+                """UPDATE clientes SET numero_contacto_llamada = %s
+                   WHERE telefono = %s""",
+                (contacto_limpio, telefono_limpio)
             )
         return telefono_limpio
 
     cursor.execute(
         "INSERT INTO clientes (telefono, nombre, numero_contacto_llamada) VALUES (%s, %s, %s)",
-        (telefono_limpio, nombre.strip() or "Cliente", telefono_limpio)
+        (telefono_limpio, nombre.strip() or "Cliente", contacto_limpio)
     )
     return telefono_limpio
 
@@ -226,6 +232,7 @@ def crear_nuevo_pedido(
     cliente_nombre: Optional[str] = None,
     tipo_entrega: str = "presencial",
     direccion: Optional[str] = None,
+    numero_contacto: Optional[str] = None,
 ) -> Dict[str, Any]:
     conn = get_connection()
     try:
@@ -239,7 +246,7 @@ def crear_nuevo_pedido(
 
         cliente_telefono_limpio = _normalizar_telefono(cliente_telefono) if cliente_telefono else ""
         if cliente_telefono_limpio:
-            cliente_telefono_limpio = _asegurar_cliente(cursor, cliente_telefono_limpio, cliente_nombre or "Cliente")
+            cliente_telefono_limpio = _asegurar_cliente(cursor, cliente_telefono_limpio, cliente_nombre or "Cliente", numero_contacto)  
 
         total_productos = 0.0
         productos_validos: List[Dict[str, Any]] = []
@@ -263,14 +270,13 @@ def crear_nuevo_pedido(
         cursor.execute(
             """
             INSERT INTO pedidos (
-                pedido_id, cliente_telefono, tipo_entrega, direccion_entrega,
+                pedido_id, cliente_telefono, tipo_entrega, direccion_entrega, telefono_contacto_entrega,
                 costo_envio, metodo_pago, pago_validado,
                 total_productos, total_envio, descuento, total_final, estado
-            ) VALUES (%s, %s, %s, %s, %s, 'efectivo', 0, %s, %s, 0, %s, 'pendiente_validacion')
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'efectivo', 0, %s, %s, 0, %s, 'pendiente_validacion')
             """,
-            (pedido_id, cliente_telefono_limpio or None, tipo_entrega, direccion, costo_envio, total_productos, costo_envio, total_con_envio)
+            (pedido_id, cliente_telefono_limpio or None, tipo_entrega, direccion, numero_contacto, costo_envio, total_productos, costo_envio, total_con_envio)
         )
-
         for producto in productos_validos:
             cursor.execute(
                 "INSERT INTO pedido_items (pedido_id, producto_id, cantidad, precio_unitario_base) VALUES (%s, %s, 1, %s)",
@@ -398,6 +404,7 @@ def obtener_historial_cliente(telefono: str) -> Dict[str, Any]:
             "cliente_id": cliente["telefono"],
             "nombre": cliente["nombre"],
             "telefono": cliente["telefono"],
+            "numero_contacto": cliente.get("numero_contacto_llamada", cliente["telefono"]),
             "direccion": cliente.get("direccion"),
             "total_pedidos": len(pedidos),
             "pedidos": pedidos,

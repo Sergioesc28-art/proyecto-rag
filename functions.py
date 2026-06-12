@@ -141,6 +141,7 @@ def crear_pedido(
     nombre: str | None = None,
     tipo_entrega: str = "presencial",
     direccion: str | None = None,
+    numero_contacto: str | None = None,
 ) -> dict:
     items_normalizados = _normalizar_items(items)
     if not items_normalizados:
@@ -151,6 +152,7 @@ def crear_pedido(
         cliente_nombre=nombre,
         tipo_entrega=tipo_entrega,
         direccion=direccion,
+        numero_contacto=numero_contacto,
     )
 
 
@@ -297,31 +299,34 @@ def validar_pago_pedido(pedido_id: str) -> dict:
 
 
 def obtener_contexto_cliente(telefono: str) -> str:
-    """
-    Arma un string de contexto personalizado del cliente para inyectar
-    en el system prompt. Se llama una sola vez cuando el cliente da su
-    teléfono y se guarda en st.session_state.contexto_cliente.
-    """
+    """Arma un string de contexto personalizado del cliente para inyectar
+    en el system prompt del LLM. 
+    
+    Se llama automáticamente cuando el usuario ingresa o actualiza su 
+    número de cuenta en el panel lateral (sidebar) y el resultado se 
+    almacena en st.session_state.contexto_cliente para no saturar la BD.
+    
+    El contexto generado consolida el teléfono base de la cuenta, el 
+    número de contacto final confirmado para la entrega, su dirección,
+    y el historial de sus productos favoritos."""
     from collections import Counter
-
     resultado = obtener_historial_cliente(telefono)
 
     if "error" in resultado:
-        return f"Cliente nuevo (teléfono: {telefono}). Sin historial previo."
+        return f"Cliente nuevo (teléfono de cuenta: {telefono}). Sin historial previo."
 
     nombre    = resultado.get("nombre", "Cliente")
     direccion = resultado.get("direccion") or "No registrada"
     total     = resultado.get("total_pedidos", 0)
     pedidos   = resultado.get("pedidos", [])
+    numero_contacto = resultado.get("numero_contacto", telefono) # <--- Extrae el contacto real
 
-    # Últimos 4 pedidos
     ultimos = pedidos[:4]
     lineas_pedidos = [
         f"  - {p['pedido_id']}: ${p['total_final']} MXN | estado: {p['estado']}"
         for p in ultimos
     ] or ["  - Sin pedidos previos"]
 
-    # Productos favoritos (top 3 más pedidos)
     conteo: Counter = Counter()
     for p in pedidos:
         for item in p.get("items", []):
@@ -334,10 +339,12 @@ def obtener_contexto_cliente(telefono: str) -> str:
         if conteo else "Sin datos suficientes"
     )
 
+    # El "prompt" de memoria que verá la IA
     return (
         f"=== CONTEXTO DEL CLIENTE ===\n"
         f"Nombre: {nombre}\n"
-        f"Teléfono: {telefono}\n"
+        f"Teléfono de Cuenta: {telefono}\n"
+        f"Número de Contacto Principal: {numero_contacto}\n"
         f"Dirección: {direccion}\n"
         f"Total de pedidos históricos: {total}\n"
         f"Últimos 4 pedidos:\n" + "\n".join(lineas_pedidos) + "\n"
