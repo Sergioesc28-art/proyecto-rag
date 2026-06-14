@@ -1,0 +1,9 @@
+# Ignorar la base de datos vectorial de ChromaDB
+chroma_db/
+
+# (Opcional) Ignorar los PDFs crudos si contienen información sensible del negocio
+pdfs/
+
+# Ignorar archivos temporales de sistema
+.DS_Store
+Thumbs.db

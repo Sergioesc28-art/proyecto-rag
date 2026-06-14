@@ -8,14 +8,11 @@ sentence-transformers>=2.3.0
 # Vector Database
 chromadb>=0.4.10
 
-# PDF Processing
-pypdf>=6.0.0
-
 # HTTP Requests
 requests>=2.31.0
 
-# Database
-# sqlite3 comes with Python stdlib, no need to install
+# Database (Supabase / PostgreSQL)
+psycopg2-binary>=2.9.0
 
 # Data Processing
 numpy>=2.0.0
