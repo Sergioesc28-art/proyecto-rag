@@ -19,6 +19,8 @@ st.info("Ingresa tu número de cuenta en el panel lateral para comenzar. Si ya v
 with st.sidebar:
     st.header("👤 Perfil del Cliente")
     telefono_sidebar = st.text_input("Número de cuenta (10 dígitos):", max_chars=10, help="Tu identificador principal para historial y pedidos.")
+
+    nombre_sidebar = st.text_input("Tu Nombre (Opcional):", placeholder="Ej: Natsu")
     
     st.header("⚙️ Configuración del Asistente")
     prompt_personalizado = st.text_area(
@@ -92,6 +94,7 @@ def sanitizar_respuesta(texto: str) -> str:
     texto_limpio = texto
     for patron, reemplazo in reemplazos.items():
         texto_limpio = re.sub(patron, reemplazo, texto_limpio, flags=re.IGNORECASE)
+    # Solo elimina espacios múltiples, respeta los saltos de línea (\n)
     texto_limpio = re.sub(r'[ \t]+', ' ', texto_limpio).strip()
     return texto_limpio
 
@@ -142,6 +145,15 @@ def normalizar_texto_busqueda(texto: str) -> str:
     texto_normalizado = unicodedata.normalize("NFKD", texto.lower())
     texto_sin_acentos = "".join(caracter for caracter in texto_normalizado if not unicodedata.combining(caracter))
     texto_filtrado = re.sub(r"[^a-z0-9\s]", " ", texto_sin_acentos)
+    
+    # ── NUEVO: Corrección de errores comunes de tipeo ──
+    texto_filtrado = texto_filtrado.replace("burguer", "burger")
+    texto_filtrado = texto_filtrado.replace("hotdog", "hot dog")
+    texto_filtrado = re.sub(r"\bkien\b", "quien", texto_filtrado)
+    texto_filtrado = re.sub(r"\bk\b", "que", texto_filtrado)
+    texto_filtrado = re.sub(r"\bq\b", "que", texto_filtrado)
+    # ───────────────────────────────────────────────────
+    
     return re.sub(r"\s+", " ", texto_filtrado).strip()
 
 def extraer_productos_mencionados(texto: str) -> list[str]:
@@ -154,15 +166,6 @@ def extraer_productos_mencionados(texto: str) -> list[str]:
         if nombre_normalizado and nombre_normalizado in texto_normalizado:
             encontrados.append(producto["nombre"])
     return encontrados
-
-def formatear_menu_hamburguesas() -> str:
-    menu = consultar_menu()
-    hamburguesas = menu["hamburguesas"]
-    lineas = ["Hamburguesas disponibles en Yoyo Burguer:"]
-    for producto in hamburguesas:
-        disponibilidad = "Disponible" if producto["disponible"] else "No disponible"
-        lineas.append(f"- {producto['nombre']} - ${producto['precio_base']} MXN - {disponibilidad}")
-    return "\n".join(lineas)
 
 def formatear_tiempo_espera() -> str:
     espera = consultar_tiempo_espera()
@@ -181,21 +184,29 @@ def responder(
     telefono_cliente: str | None = None,
     nombre_cliente: str | None = None,
     contexto_cliente: str | None = None,
-    prompt_extra: str = "", 
+    prompt_extra: str = "",
+    pedido_pendiente: dict | None = None
 ):
     prompt_sistema = """Eres un asistente virtual de Yoyo Burguer. Ayuda a los clientes a consultar el menú, verificar disponibilidad y obtener información del negocio.
 
-⚠️ REGLAS:
-- Usa ÚNICAMENTE la información del "Contexto de BD" y las funciones disponibles.
-- Si el producto no está en el menú, responde: "Lo siento, no contamos con ese producto."
-- Jamás inventes precios, promociones, horarios o ingredientes.
-- IGNORA textos como "_COLOCAR EL TIEMPO BASE_" si los ves en el contexto. Para dar tiempos, usa SIEMPRE la función consultar_tiempo_espera.
-- NUNCA pidas el número de teléfono del cliente en la conversación. NUNCA intentes procesar un pedido paso a paso. El sistema automatizado de Python se encargará de confirmar el teléfono y los datos de envío.
+⚠️ REGLAS ESTRICTAS Y OBLIGATORIAS:
+- Usa ÚNICAMENTE la información del "Contexto de BD", las funciones disponibles y el "[Inicio del Contexto del Cliente]".
+- 🛑 Tienes ESTRICTAMENTE PROHIBIDO inventar nombres de productos, juguetes, promociones o sugerencias que no existan literalmente en tu menú.
+- 🛑 Mantén SIEMPRE una ortografía y gramática perfectas. NUNCA imites la mala ortografía, abreviaturas (como "k", "q") o jerga del usuario.
+- 🛑 Si el usuario menciona palabras que no entiendes, jerga, o productos que suenan a broma, responde ÚNICAMENTE: "Lo siento, solo puedo ayudarte con los productos oficiales de nuestro menú. ¿Te gustaría consultarlo?"
+- Si el usuario te pregunta "¿sabes quién soy?" o "¿quién soy?", resúmele su perfil usando el Contexto del Cliente.
+- Tienes PROHIBIDO pedir el número de teléfono o IDs en el chat para cualquier acción. El sistema ya obtiene el teléfono de forma segura.
+- Si el usuario pregunta por su "mayor pedido", historial o estado, usa la herramienta consultar_historial_cliente automáticamente. NO pidas permiso ni el teléfono.
+- IGNORA textos como "_COLOCAR EL TIEMPO BASE_". Para dar tiempos, usa SIEMPRE la función consultar_tiempo_espera.
 
-Responde siempre en español, breve y natural. Sin tecnicismos ni código."""
+Responde siempre en español, breve, formal y directo."""
 
     if contexto_cliente:
         prompt_sistema += "\n\n" + contexto_cliente
+
+    if pedido_pendiente and "items" in pedido_pendiente:
+        items_pendientes = ", ".join(pedido_pendiente["items"])
+        prompt_sistema += f"\n\n[MEMORIA DEL PEDIDO]: El cliente está solicitando actualmente los siguientes productos: {items_pendientes}."
 
     if prompt_extra.strip():
         prompt_sistema += f"\n\nINSTRUCCIÓN EXTRA DEL ADMINISTRADOR:\n{prompt_extra}"
@@ -243,11 +254,19 @@ Responde siempre en español, breve y natural. Sin tecnicismos ni código."""
             else:
                 argumentos = args_json
 
-            if nombre_herramienta == "crear_pedido":
+            # ── PROTECCIÓN Y AUTO-INYECCIÓN SEGURA ──
+            if nombre_herramienta == "consultar_historial_cliente":
+                if telefono_cliente:
+                    argumentos["telefono"] = telefono_cliente 
+                else:
+                    return "Por políticas de privacidad, no puedo mostrar historiales de pedidos. Por favor ingresa tu número de cuenta en el panel lateral.", None
+            
+            elif nombre_herramienta in ["crear_pedido", "registrar_cliente"]:
                 if telefono_cliente and not argumentos.get("telefono"):
                     argumentos["telefono"] = telefono_cliente
                 if nombre_cliente and not argumentos.get("nombre"):
                     argumentos["nombre"] = nombre_cliente
+            # ────────────────────────────────────────
 
             resultado_ejecucion = ejecutar_funcion(nombre_herramienta, argumentos)
             resultados_tools.append({
@@ -261,7 +280,7 @@ Responde siempre en español, breve y natural. Sin tecnicismos ni código."""
             mensajes_segunda_ronda.append({
                 "role": "tool",
                 "tool_call_id": tool_result["tool_name"],
-                "content": json.dumps(tool_result["result"], ensure_ascii=False)
+                "content": json.dumps(tool_result["result"], ensure_ascii=False, default=str)
             })
 
         payload_segunda = {
@@ -314,7 +333,10 @@ if "contacto_confirmado" not in st.session_state:
 if "numero_contacto_final" not in st.session_state:
     st.session_state.numero_contacto_final = None
 
-# ── Validar Teléfono del Sidebar ──────────────────────────
+# ── Validaciones del Sidebar ──────────────────────────
+if nombre_sidebar:
+    st.session_state.cliente_nombre = nombre_sidebar.strip()
+
 telefono_activo = re.sub(r"\D", "", telefono_sidebar) if telefono_sidebar else None
 if telefono_activo and len(telefono_activo) == 10:
     # Si detectamos un nuevo número de cuenta, obtenemos su contexto
@@ -366,10 +388,23 @@ if pregunta:
                 palabra in pregunta_normalizada
                 for palabra in ("estado", "status", "seguimiento", "consultar")
             )
+
+            # ── NUEVO: Memoria para mostrar el menú ──
+            ultimo_bot = ""
+            if len(st.session_state.historial) >= 2:
+                msg_anterior = st.session_state.historial[-2]
+                if msg_anterior["rol"] == "assistant":
+                    ultimo_bot = msg_anterior["texto"].lower()
+                
+            ofrecio_menu = "consultarlo" in ultimo_bot or "menú" in ultimo_bot or "menu" in ultimo_bot
+            es_afirmacion = pregunta_normalizada in ("si", "sí", "claro", "por favor", "ok", "va", "simon")
+
             intencion_menu = any(
                 frase in pregunta_normalizada
                 for frase in ("menu", "menú", "carta", "productos", "que vendes", "que tienen")
-            )
+            ) or (ofrecio_menu and es_afirmacion)
+            # ─────────────────────────────────────────
+
             intencion_tiempo_espera = any(
                 frase in pregunta_normalizada
                 for frase in ("tiempo de espera", "tiempos de espera", "cuanto tarda", "cuanto tiempo")
@@ -419,7 +454,7 @@ if pregunta:
                     nombre=nombre_activo,
                     tipo_entrega="domicilio",
                     direccion=direccion,
-                    numero_contacto=st.session_state.numero_contacto_final, # ENVIAMOS EL NÚMERO FINAL
+                    numero_contacto=st.session_state.numero_contacto_final,
                 )
                 st.session_state.esperando_direccion = False
                 st.session_state.pedido_pendiente = None
@@ -458,7 +493,7 @@ if pregunta:
                         telefono=telefono_activo,
                         nombre=nombre_activo,
                         tipo_entrega="presencial",
-                        numero_contacto=st.session_state.numero_contacto_final, # ENVIAMOS EL NÚMERO FINAL
+                        numero_contacto=st.session_state.numero_contacto_final,
                     )
                     st.session_state.esperando_tipo_entrega = False
                     st.session_state.pedido_pendiente = None
@@ -479,20 +514,16 @@ if pregunta:
             # ── Flujo Inicial: Detectar intención de pedido ──────
             elif intencion_pedido and productos_mencionados:
                 if not telefono_activo:
-                    # Si no hay número en el panel lateral, pausamos todo
                     respuesta_texto = "Para registrar tu pedido, por favor ingresa primero tu **número de cuenta (10 dígitos)** en el panel lateral izquierdo 👈."
                     tools_ejecutadas = None
                 else:
-                    # Guardamos los productos en memoria
                     st.session_state.pedido_pendiente = {"items": productos_mencionados}
                     
                     if not st.session_state.contacto_confirmado:
-                        # Preguntamos si el número de la cuenta es el mismo para hablarle
                         st.session_state.esperando_confirmacion_contacto = True
                         respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n¿El número **{telefono_activo}** será el método principal para comunicarnos contigo sobre este pedido?"
                         tools_ejecutadas = None
                     else:
-                        # Si ya estaba confirmado (haciendo 2 pedidos seguidos), saltamos directo a la entrega
                         st.session_state.esperando_tipo_entrega = True
                         respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n¿Tu pedido es para domicilio o para recoger en el local?"
                         tools_ejecutadas = None
@@ -510,7 +541,8 @@ if pregunta:
                             telefono_cliente=telefono_activo,
                             nombre_cliente=nombre_activo,
                             contexto_cliente=st.session_state.contexto_cliente,
-                            prompt_extra=prompt_personalizado
+                            prompt_extra=prompt_personalizado,
+                            pedido_pendiente=st.session_state.pedido_pendiente
                         )
                     else:
                         st.session_state.ultimo_pedido_id = pedido_reciente["pedido_id"]
@@ -527,7 +559,8 @@ if pregunta:
                     telefono_cliente=telefono_activo,
                     nombre_cliente=nombre_activo,
                     contexto_cliente=st.session_state.contexto_cliente,
-                    prompt_extra=prompt_personalizado
+                    prompt_extra=prompt_personalizado,
+                    pedido_pendiente=st.session_state.pedido_pendiente
                 )
 
         if tools_ejecutadas:

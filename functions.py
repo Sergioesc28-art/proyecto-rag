@@ -341,7 +341,7 @@ def obtener_contexto_cliente(telefono: str) -> str:
 
     # El "prompt" de memoria que verá la IA
     return (
-        f"=== CONTEXTO DEL CLIENTE ===\n"
+        f"[Inicio del Contexto del Cliente]\n"
         f"Nombre: {nombre}\n"
         f"Teléfono de Cuenta: {telefono}\n"
         f"Número de Contacto Principal: {numero_contacto}\n"
@@ -349,5 +349,5 @@ def obtener_contexto_cliente(telefono: str) -> str:
         f"Total de pedidos históricos: {total}\n"
         f"Últimos 4 pedidos:\n" + "\n".join(lineas_pedidos) + "\n"
         f"Productos favoritos: {favoritos}\n"
-        f"==========================="
+        f"[Fin del Contexto del Cliente]"
     )

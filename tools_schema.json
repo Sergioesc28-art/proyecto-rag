@@ -161,7 +161,7 @@
     "type": "function",
     "function": {
       "name": "consultar_historial_cliente",
-      "description": "Devuelve el historial completo de pedidos de un cliente registrado. Necesita el número de teléfono del cliente.",
+      "description": "Devuelve el historial completo de pedidos del cliente actual. El sistema ya inyecta su número de forma segura, NO se lo pidas al usuario en el chat.",
       "parameters": {
         "type": "object",
         "properties": {
