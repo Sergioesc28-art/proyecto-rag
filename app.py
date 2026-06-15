@@ -21,7 +21,7 @@ from ui.chat_components import (
 
 from core.state_manager import inicializar_estado, EstadoConversacion, resetear_flujo_pedido
 from core.prompt_manager import construir_prompt_sistema
-from core.llm_service import generar_respuesta_llm_stream, sanitizar_respuesta # <-- ¡Corregido aquí!
+from core.llm_service import generar_respuesta_llm_stream, sanitizar_respuesta
 
 from services.customer_service import obtener_contexto_cliente
 from services.tool_registry import ejecutar_herramienta
@@ -58,10 +58,45 @@ def formatear_menu_completo() -> str:
     return "\n".join(lineas)
 
 def extraer_productos_mencionados(texto: str) -> list[str]:
+    """Extrae productos usando un diccionario de alias para capturar nombres coloquiales."""
+    txt_norm = normalizar_texto(texto)
+    encontrados = set()
+    
+    # Mapeo de alias coloquiales a nombres oficiales de catálogo
+    alias_menu = {
+        "sencilla": "Hamburguesa Sencilla",
+        "doble": "Hamburguesa Doble Carne",
+        "doble carne": "Hamburguesa Doble Carne",
+        "hawaiana": "Hamburguesa Hawaiana",
+        "hamburguesa especial": "Hamburguesa Especial",
+        "especial doble": "Hamburguesa Especial Doble Carne",
+        "natsu": "Natsu Burger",
+        "hot dog sencillo": "Hot Dog Sencillo",
+        "jocho sencillo": "Hot Dog Sencillo",
+        "hot dog hawaiano": "Hot Dog Hawaiano",
+        "jocho hawaiano": "Hot Dog Hawaiano",
+        "hot dog especial": "Hot Dog Especial",
+        "jocho especial": "Hot Dog Especial",
+        "papas": "Papas a la francesa",
+        "francesas": "Papas a la francesa",
+        "salchichas": "Salchichas tipo pulpo",
+        "pulpos": "Salchichas tipo pulpo",
+        "salchipulpos": "Salchichas tipo pulpo"
+    }
+
+    # Búsqueda por palabra exacta mediante límites de palabra (Regex)
+    for alias, nombre_oficial in alias_menu.items():
+        if re.search(rf"\b{alias}\b", txt_norm):
+            encontrados.add(nombre_oficial)
+
+    # Búsqueda estricta de respaldo por si escriben el nombre completo
     menu = consultar_menu()
     productos = menu["hamburguesas"] + menu["hot_dogs"] + menu["complementos"]
-    txt_norm = normalizar_texto(texto)
-    return [p["nombre"] for p in productos if normalizar_texto(p["nombre"]) in txt_norm]
+    for p in productos:
+        if normalizar_texto(p["nombre"]) in txt_norm:
+            encontrados.add(p["nombre"])
+
+    return list(encontrados)
 
 # ── Renderizado de UI Estática ───────────────────────────────────────────
 render_header()
@@ -75,7 +110,7 @@ if pregunta:
     display_user_message(pregunta)
     pregunta_norm = normalizar_texto(pregunta)
     
-    # Referencias rápidas al estado actual
+    # Referencias rápidas al estado actual de la sesión
     tel_activo = st.session_state.cliente_telefono
     nom_activo = st.session_state.cliente_nombre
     estado_actual = st.session_state.estado_conversacion
@@ -83,24 +118,53 @@ if pregunta:
     with render_loading_spinner():
         respuesta_texto = ""
         tools_ejecutadas = None
-        es_respuesta_estatica = True # Bandera para saber si usamos streaming o no
+        es_respuesta_estatica = True 
 
-        # ── MÁQUINA DE ESTADOS: FLUJOS ACTIVOS ──
+        # ── MÁQUINA DE ESTADOS: FLUJOS ACTIVOS DE TRANSACCIÓN ──
         if estado_actual == EstadoConversacion.ESPERANDO_CONFIRMACION_CONTACTO:
-            es_afirmacion = any(p in pregunta_norm for p in ("si", "claro", "ok", "va", "simon"))
+            # Agregamos "sip" y "sipi" a la lista para mayor cobertura
+            es_afirmacion = any(p in pregunta_norm for p in ("si", "sip", "sipi", "claro", "ok", "va", "simon", "perfecto"))
             es_negacion = any(p in pregunta_norm for p in ("no", "otro", "cambiar"))
             posible_numero = extraer_telefono(pregunta)
 
-            if posible_numero:
-                st.session_state.numero_contacto_final = posible_numero
-                st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_TIPO_ENTREGA
-                respuesta_texto = f"¡Anotado! Nos comunicaremos al **{posible_numero}**.\n¿Tu pedido es para domicilio o para recoger en el local?"
+            # Detectar si el usuario incluyó el tipo de entrega en el mismo mensaje
+            es_domicilio_adelantado = any(p in pregunta_norm for p in ("domicilio", "casa", "envio", "llevar"))
+            es_local_adelantado = any(p in pregunta_norm for p in ("local", "recoger", "presencial", "ahi", "voy"))
+
+            if posible_numero or es_afirmacion:
+                st.session_state.numero_contacto_final = posible_numero if posible_numero else tel_activo
+                
+                # Guardamos el número en una variable segura antes del reseteo de la máquina de estados
+                contacto_usado = st.session_state.numero_contacto_final 
+                
+                # Caso adelantado 1: El usuario confirmó número y dijo que es en el local
+                if es_local_adelantado:
+                    res_pedido = crear_pedido(
+                        st.session_state.pedido_pendiente["items"],
+                        telefono=tel_activo, nombre=nom_activo, tipo_entrega="presencial",
+                        numero_contacto=contacto_usado
+                    )
+                    resetear_flujo_pedido()
+                    if "error" in res_pedido:
+                        respuesta_texto = res_pedido["error"]
+                    else:
+                        st.session_state.ultimo_pedido_id = res_pedido.get("pedido_id")
+                        respuesta_texto = (f"¡Pedido registrado! 🎉\n🏠 Para recoger en local\n"
+                                           f"📞 Contacto: {contacto_usado}\n"
+                                           f"💰 Total: ${res_pedido['total_final']} MXN\n🍔 ¡Gracias por tu compra!")
+                
+                # Caso adelantado 2: El usuario confirmó número y dijo que quiere a domicilio
+                elif es_domicilio_adelantado:
+                    st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_DIRECCION
+                    respuesta_texto = "¡Anotado! ¿Cuál es tu dirección de entrega?"
+                
+                # Flujo normal: solo confirmó número de contacto
+                else:
+                    st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_TIPO_ENTREGA
+                    respuesta_texto = "¡Perfecto!\n¿Tu pedido es para domicilio o para recoger en el local?"
+            
             elif es_negacion:
                 respuesta_texto = "Entendido. Por favor, escribe aquí el nuevo número de 10 dígitos al que debemos comunicarnos."
-            elif es_afirmacion:
-                st.session_state.numero_contacto_final = tel_activo
-                st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_TIPO_ENTREGA
-                respuesta_texto = "¡Perfecto!\n¿Tu pedido es para domicilio o para recoger en el local?"
             else:
                 respuesta_texto = f"No entendí bien. ¿Nos comunicaremos al número de cuenta ({tel_activo})? (Responde Sí/No o escribe un número nuevo)."
 
@@ -112,27 +176,29 @@ if pregunta:
                 st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_DIRECCION
                 respuesta_texto = "¡Perfecto! ¿Cuál es tu dirección de entrega?"
             elif es_local:
+                contacto_usado = st.session_state.numero_contacto_final
                 res_pedido = crear_pedido(
                     st.session_state.pedido_pendiente["items"],
                     telefono=tel_activo, nombre=nom_activo, tipo_entrega="presencial",
-                    numero_contacto=st.session_state.numero_contacto_final
+                    numero_contacto=contacto_usado
                 )
-                resetear_flujo_pedido()
+                resetear_flujo_pedido() 
                 if "error" in res_pedido:
                     respuesta_texto = res_pedido["error"]
                 else:
                     st.session_state.ultimo_pedido_id = res_pedido.get("pedido_id")
                     respuesta_texto = (f"¡Pedido registrado! 🎉\n🏠 Para recoger en local\n"
-                                       f"📞 Contacto: {res_pedido['numero_contacto']}\n"
+                                       f"📞 Contacto: {contacto_usado}\n" 
                                        f"💰 Total: ${res_pedido['total_final']} MXN\n🍔 ¡Gracias por tu compra!")
             else:
                 respuesta_texto = "¿Tu pedido es para domicilio o para recoger en el local?"
 
         elif estado_actual == EstadoConversacion.ESPERANDO_DIRECCION:
+            contacto_usado = st.session_state.numero_contacto_final
             res_pedido = crear_pedido(
                 st.session_state.pedido_pendiente["items"],
                 telefono=tel_activo, nombre=nom_activo, tipo_entrega="domicilio",
-                direccion=pregunta.strip(), numero_contacto=st.session_state.numero_contacto_final
+                direccion=pregunta.strip(), numero_contacto=contacto_usado
             )
             resetear_flujo_pedido()
             if "error" in res_pedido:
@@ -146,11 +212,16 @@ if pregunta:
                                    f"🚚 Costo envío: ${res_pedido['costo_envio']} MXN\n"
                                    f"💰 Total final: ${res_pedido['total_final']} MXN\n🍔 ¡Gracias por tu compra!")
 
-        # ── DETECCIÓN DE INTENCIONES GENERALES (Flujo Normal) ──
+        # ── DETECCIÓN DE INTENCIONES GENERALES (Fase de Escaneo Pre-LLM) ──
         else:
-            intencion_pedido = any(p in pregunta_norm for p in ("pedido", "comprar", "quiero", "dame"))
-            intencion_menu = any(p in pregunta_norm for p in ("menu", "carta", "productos", "que vendes"))
-            intencion_tiempo = any(p in pregunta_norm for p in ("tiempo de espera", "cuanto tarda"))
+            palabras_pedido = (
+                "pedido", "comprar", "quiero", "dame", "me gustaria", "me gustaría", 
+                "orden", "ordeno", "para mi", "llevo", "llevar", "encargo", 
+                "voy a querer", "me das", "agrega"
+            )
+            intencion_pedido = any(p in pregunta_norm for p in palabras_pedido)
+            intencion_menu = any(p in pregunta_norm for p in ("menu", "carta", "productos", "que vendes", "tienen", "venden"))
+            intencion_tiempo = any(p in pregunta_norm for p in ("tiempo de espera", "cuanto tarda", "demora"))
             productos_mencionados = extraer_productos_mencionados(pregunta)
 
             if intencion_menu:
@@ -168,9 +239,9 @@ if pregunta:
                     st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_CONFIRMACION_CONTACTO
                     respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n¿El número **{tel_activo}** será el método principal para comunicarnos contigo sobre este pedido?"
             
-            # ── DELEGACIÓN AL LLM / RAG CON STREAMING (QWEN2.5) ──
+            # ── DELEGACIÓN CONTROLADA AL LLM (QWEN2.5 VIA STREAMING SSE) ──
             else:
-                es_respuesta_estatica = False # Aquí activamos la lectura del streaming
+                es_respuesta_estatica = False 
                 contexto_rag = buscar_contexto(pregunta)
                 prompt_sys = construir_prompt_sistema(
                     contexto_cliente=st.session_state.contexto_cliente,
@@ -188,30 +259,29 @@ if pregunta:
                     nombre_cliente=nom_activo
                 )
 
-                # Monitoreo silencioso de pedidos por IA
                 if tools_ejecutadas:
                     for t in tools_ejecutadas:
                         if t["tool_name"] == "crear_pedido" and t["result"].get("exito"):
                             st.session_state.ultimo_pedido_id = t["result"]["resultado"].get("pedido_id")
 
-                # Imprimir el texto con efecto visual de streaming
+                # Dibujar la respuesta en tiempo real en la pantalla
                 with st.chat_message("assistant"):
                     texto_final = st.write_stream(generador_respuesta)
-
-                    # ── NUEVO: Dibujar tarjetas de historial al vuelo ──
+                    
+                    # Si ejecutó el historial mediante Tool Calling, inyectamos las tarjetas visuales nativas aquí
                     if tools_ejecutadas:
                         for t in tools_ejecutadas:
                             if t["tool_name"] == "consultar_historial_cliente" and t["result"].get("exito"):
                                 render_tarjetas_historial(t["result"]["resultado"].get("pedidos", []))
                 
-                # Guardar en el historial
+                # Persistir la traza limpia en la memoria de la sesión
                 st.session_state.historial.append({
                     "rol": "assistant",
                     "texto": sanitizar_respuesta(texto_final),
                     "tools_ejecutadas": tools_ejecutadas
                 })
 
-        # ── RENDERIZADO SI LA RESPUESTA FUE ESTÁTICA ──
+        # ── RENDERIZADO DE FLUJOS INTERNOS DE PYTHON ──
         if es_respuesta_estatica:
             with st.chat_message("assistant"):
                 st.write(respuesta_texto)

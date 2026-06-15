@@ -11,6 +11,7 @@ def construir_prompt_sistema(
 4. LENGUAJE: Responde de forma natural, humana y conversacional. No uses jerga técnica.
 5. HISTORIAL: Si el usuario pregunta por su historial, usa consultar_historial_cliente automáticamente. 
 6. RENDERIZADO VISUAL: Si usas la herramienta 'consultar_historial_cliente', el sistema dibujará la tabla por ti. Tú SOLO responde: "Aquí tienes el detalle de tus últimos pedidos:" y NO intentes listar los productos, fechas, ni IDs en tu texto.
+7. 🛑 TOMA DE PEDIDOS: Tienes ESTRICTAMENTE PROHIBIDO intentar tomar el pedido, confirmar números de teléfono o preguntar por entrega a domicilio/local. Si el cliente te pide comida, SOLO responde: "¡Claro! Por favor confírmame exactamente qué productos te gustaría ordenar." (El sistema interno lo atrapará en el siguiente mensaje).
 
 [EJEMPLOS DE CÓMO DEBES RESPONDER]
 Usuario: ¿A qué hora cierran?
