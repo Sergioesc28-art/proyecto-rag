@@ -15,16 +15,17 @@ from infrastructure.query import buscar_contexto
 from ui.sidebar import render_sidebar
 from ui.chat_components import (
     render_header, render_chat_history, 
-    display_user_message, display_assistant_message, render_loading_spinner
+    display_user_message, render_loading_spinner,
+    render_tarjetas_historial
 )
 
 from core.state_manager import inicializar_estado, EstadoConversacion, resetear_flujo_pedido
 from core.prompt_manager import construir_prompt_sistema
-from core.llm_service import generar_respuesta_llm
+from core.llm_service import generar_respuesta_llm_stream, sanitizar_respuesta # <-- ¡Corregido aquí!
 
 from services.customer_service import obtener_contexto_cliente
 from services.tool_registry import ejecutar_herramienta
-from services.order_service import crear_pedido, consultar_estado_pedido, consultar_tiempo_espera
+from services.order_service import crear_pedido, consultar_tiempo_espera
 from services.menu_service import consultar_menu
 
 # ── Inicialización de Dependencias ──
@@ -82,6 +83,7 @@ if pregunta:
     with render_loading_spinner():
         respuesta_texto = ""
         tools_ejecutadas = None
+        es_respuesta_estatica = True # Bandera para saber si usamos streaming o no
 
         # ── MÁQUINA DE ESTADOS: FLUJOS ACTIVOS ──
         if estado_actual == EstadoConversacion.ESPERANDO_CONFIRMACION_CONTACTO:
@@ -166,16 +168,16 @@ if pregunta:
                     st.session_state.estado_conversacion = EstadoConversacion.ESPERANDO_CONFIRMACION_CONTACTO
                     respuesta_texto = f"¡Anotado! Quieres: {', '.join(productos_mencionados)}.\n¿El número **{tel_activo}** será el método principal para comunicarnos contigo sobre este pedido?"
             
-            # ── DELEGACIÓN AL LLM / RAG (QWEN2.5) ──
+            # ── DELEGACIÓN AL LLM / RAG CON STREAMING (QWEN2.5) ──
             else:
+                es_respuesta_estatica = False # Aquí activamos la lectura del streaming
                 contexto_rag = buscar_contexto(pregunta)
                 prompt_sys = construir_prompt_sistema(
                     contexto_cliente=st.session_state.contexto_cliente,
-                    pedido_pendiente=st.session_state.pedido_pendiente,
-                    prompt_extra=st.session_state.prompt_personalizado
+                    pedido_pendiente=st.session_state.pedido_pendiente
                 )
                 
-                respuesta_texto, tools_ejecutadas = generar_respuesta_llm(
+                generador_respuesta, tools_ejecutadas = generar_respuesta_llm_stream(
                     pregunta=pregunta,
                     historial=st.session_state.historial,
                     contexto_rag=contexto_rag,
@@ -186,11 +188,35 @@ if pregunta:
                     nombre_cliente=nom_activo
                 )
 
-                # Monitoreo silencioso: Actualizar UI si el LLM creó un pedido exitosamente mediante Tool Calling
+                # Monitoreo silencioso de pedidos por IA
                 if tools_ejecutadas:
                     for t in tools_ejecutadas:
                         if t["tool_name"] == "crear_pedido" and t["result"].get("exito"):
                             st.session_state.ultimo_pedido_id = t["result"]["resultado"].get("pedido_id")
 
-        # Renderizar y guardar respuesta
-        display_assistant_message(respuesta_texto, tools_ejecutadas)
+                # Imprimir el texto con efecto visual de streaming
+                with st.chat_message("assistant"):
+                    texto_final = st.write_stream(generador_respuesta)
+
+                    # ── NUEVO: Dibujar tarjetas de historial al vuelo ──
+                    if tools_ejecutadas:
+                        for t in tools_ejecutadas:
+                            if t["tool_name"] == "consultar_historial_cliente" and t["result"].get("exito"):
+                                render_tarjetas_historial(t["result"]["resultado"].get("pedidos", []))
+                
+                # Guardar en el historial
+                st.session_state.historial.append({
+                    "rol": "assistant",
+                    "texto": sanitizar_respuesta(texto_final),
+                    "tools_ejecutadas": tools_ejecutadas
+                })
+
+        # ── RENDERIZADO SI LA RESPUESTA FUE ESTÁTICA ──
+        if es_respuesta_estatica:
+            with st.chat_message("assistant"):
+                st.write(respuesta_texto)
+            st.session_state.historial.append({
+                "rol": "assistant",
+                "texto": respuesta_texto,
+                "tools_ejecutadas": tools_ejecutadas
+            })

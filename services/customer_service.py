@@ -44,12 +44,7 @@ def obtener_contexto_cliente(telefono: str) -> str:
     pedidos   = resultado.get("pedidos", [])
     numero_contacto = resultado.get("numero_contacto", telefono)
 
-    ultimos = pedidos[:4]
-    lineas_pedidos = [
-        f"  - {p['pedido_id']}: ${float(p['total_final'])} MXN | estado: {p['estado']}"
-        for p in ultimos
-    ] or ["  - Sin pedidos previos"]
-
+    # Solo extraemos los favoritos, omitimos inyectar los IDs de pedidos para evitar alucinaciones
     conteo = Counter()
     for p in pedidos:
         for item in p.get("items", []):
@@ -69,7 +64,6 @@ def obtener_contexto_cliente(telefono: str) -> str:
         f"Número de Contacto Principal: {numero_contacto}\n"
         f"Dirección: {direccion}\n"
         f"Total de pedidos históricos: {total}\n"
-        f"Últimos 4 pedidos:\n" + "\n".join(lineas_pedidos) + "\n"
         f"Productos favoritos: {favoritos}\n"
         f"[Fin del Contexto del Cliente]"
     )
